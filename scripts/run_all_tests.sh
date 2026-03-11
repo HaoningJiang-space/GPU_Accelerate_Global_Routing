@@ -64,16 +64,16 @@ else
     BIN="${REPO}/router_lp/router_lp"
     [[ -f "${BIN}" ]] || bash "${REPO}/scripts/build_router_lp.sh"
 
+    B1_RC=0
     timeout 120 "${BIN}" \
         -cap "${CAP}" -net "${NET}" -out "${OUT}" \
         --max-nets 500 --max-hpwl 30 \
         --gpu "${GPU_ID}" --config "${REPO}/router_lp/config/cupdlpx_routing_default.yaml" \
-        > /tmp/b1_smoke.txt 2>&1
-    B1_RC=$?
+        > /tmp/b1_smoke.txt 2>&1 || B1_RC=$?
 
-    routed=$(grep "^  routed_nets" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
-    disconn=$(grep "^  disconnected" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
-    solve_t=$(grep "^  solve_time" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
+    routed=$(grep "^  routed_nets" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    disconn=$(grep "^  disconnected" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    solve_t=$(grep "^  solve_time" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ' || true)
     out_size=$(wc -c < "${OUT}" 2>/dev/null || echo 0)
 
     b1_ok=1
