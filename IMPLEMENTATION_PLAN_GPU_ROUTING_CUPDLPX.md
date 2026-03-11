@@ -3,11 +3,11 @@
 ## 0. 目标与原则
 
 ### 0.1 总目标
-将 `InstantGR` 的 GPU 路由能力与 `cuPDLPx` 的 LP 求解能力结合，形成一条“理论可解释 + 工程可运行”的全局布线优化路线：
+以 `cuPDLPx` 为核心求解后端，构建一条“理论可解释 + 工程可运行”的新 GPU global routing 路线；`InstantGR` 仅作为 baseline 与算法参考，不作为融合对象：
 
 1. 先有可运行基线（InstantGR 原流程不破坏）。
 2. 再把路由问题逐步 LP 化（从小规模子问题开始）。
-3. 最后形成可回退、可对比、可扩展的混合求解框架。
+3. 最后形成可回退、可对比、可扩展的新路由原型框架。
 
 ### 0.2 借鉴现有 md 的核心立场
 参考 `gpu_global_routing_cupdlpx_analysis.md`：
@@ -20,12 +20,15 @@
 1. 每阶段都有可运行产物和评估指标。
 2. 每阶段都可独立回滚（Git checkpoint）。
 3. 小步快跑：先 correctness，再性能。
+4. 独立工程边界：不改 `InstantGR` 源码，不链接/调用 `InstantGR` 代码，仅使用其结果做 baseline 对比。
 
 ---
 
 ## 1. 代码现状映射（作为计划基座）
 
 ### 1.1 InstantGR（当前可用主链）
+用途定位：`baseline + 算法借鉴`（RSMT、batch、detour、拥塞视图），不作为主线集成目标，不复用其代码实现。
+
 - 入口：`InstantGR/src/main.cpp`
 - 数据读取：`InstantGR/src/database.hpp`
 - GPU 数据与 RSMT/batch：`InstantGR/src/database_cuda.hpp`
@@ -41,9 +44,9 @@
 - 预处理/缩放：`cuPDLPx/src/presolve.c`, `cuPDLPx/src/preconditioner.cu`
 
 ### 1.3 关键差距（必须补齐）
-1. InstantGR 的“路由表示”与 LP 的变量矩阵表示未打通。
+1. 缺少“routing LP 问题构造 -> cuPDLPx 求解 -> 离散恢复”的完整闭环实现。
 2. 还没有统一的 benchmark I/O 和指标对比框架。
-3. 缺少“只替换一个子模块”的渐进式实验开关。
+3. 缺少从 baseline 到新原型的公平对比与回归机制。
 
 ### 1.4 cuPDLPx 复用策略（强约束）
 本项目默认“优先复用 cuPDLPx”，避免自研重复求解器内核：
@@ -111,7 +114,7 @@
 ### B0. 先做 cuPDLPx 最小直连 PoC（必须先于 B1）
 - 任务：在不改 cuPDLPx 核心代码前提下，做一条最小路由 LP 的端到端调用。
 - 交付：
-  - `lp_bridge/examples/min_route_lp_with_cupdlpx.cpp`
+  - `router_lp/examples/min_route_lp_with_cupdlpx.cpp`
   - `scripts/run_min_lp_poc.sh`
 - 验收：
   1. 能调用 `create_lp_problem + solve_lp_problem`。
@@ -119,10 +122,10 @@
   3. 失败时有清晰 fallback 日志。
 
 ### B1. 定义 LP 中间表示（IR）
-- 任务：在本仓库新增独立模块，不直接改 InstantGR 主路由逻辑。
+- 任务：在本仓库新增独立模块，作为“新路由原型”的核心，不依赖改动 InstantGR 主逻辑。
 - 新增目录建议：
-  - `lp_bridge/include/`
-  - `lp_bridge/src/`
+  - `router_lp/include/`
+  - `router_lp/src/`
 - 关键结构：
   - `RoutingLPProblem`（变量索引、约束索引、稀疏矩阵构造器）
   - `RoutingLPSolution`（x/dual/状态）
@@ -138,8 +141,8 @@
 ### B3. 导出到 cuPDLPx 输入
 - 任务：把 IR 转成 `cupdlpx` C API 需要的 CSR + bounds。
 - 对接文件建议：
-  - `lp_bridge/src/to_cupdlpx.cpp`
-  - `lp_bridge/src/solve_with_cupdlpx.cpp`
+  - `router_lp/src/to_cupdlpx.cpp`
+  - `router_lp/src/solve_with_cupdlpx.cpp`
 - 验收：小案例可调用 `solve_lp_problem` 返回可解释状态。
 
 ### B3.1 cuPDLPx 参数映射规范（新增）
@@ -151,31 +154,31 @@
   4. `time_limit = 30~120s`（按子图规模）
   5. `feasibility_polishing = true`（仅在后处理阶段）
 - 交付：
-  - `lp_bridge/config/cupdlpx_routing_default.yaml`
-  - `lp_bridge/src/cupdlpx_param_loader.cpp`
+  - `router_lp/config/cupdlpx_routing_default.yaml`
+  - `router_lp/src/cupdlpx_param_loader.cpp`
 
 ### B4. LP 结果回写路由（最小版本）
-- 任务：将连续解投影/抽取为可行路由骨架（先允许启发式后处理）。
+- 任务：将连续解投影/抽取为可行路由骨架（先允许启发式后处理，可借鉴 InstantGR 的 detour 思想）。
 - 交付：
-  - `lp_bridge/src/solution_rounding.cpp`
+  - `router_lp/src/solution_rounding.cpp`
 - 验收：生成可被现有 evaluator 消费的输出。
 
 ---
 
-## Phase C: 与 InstantGR 的“可控耦合”（3-5 天）
+## Phase C: 新路由原型闭环（3-5 天）
 
-### C1. 运行模式开关
-在 `InstantGR/src/main.cpp` 增加模式参数：
-1. `--mode baseline`（原始流程）
-2. `--mode lp_seed`（LP 先给初始引导，再走现有 detour）
-3. `--mode lp_refine`（先原路由，再 LP 局部修正）
+### C1. 新原型入口与运行模式
+新增独立入口（建议：`router_lp/main.cpp`）：
+1. `--mode pure_lp`（LP + rounding + repair）
+2. `--mode lagrangian_path`（Pathfinding 风格 shortest-path + multiplier）
+3. `--mode hybrid`（pricing/path pool + cuPDLPx master LP）
 
 ### C2. 局部子问题策略
 - 先只对 overflow hotspot 子图做 LP（避免全图过大）。
-- 子图来源：复用 `graph::extract_congestionView` 输出。
+- hotspot 生成可借鉴 InstantGR 的拥塞视图思路，但数据结构在新原型内独立实现。
 
 ### C3. 回退机制
-- 若 LP 超时/失败：自动回落 baseline，不中断整条流程。
+- 若 LP 超时/失败：记录失败并切换到 `lagrangian_path` 或 `repair-only`，保证流程可完成。
 
 ---
 
@@ -188,7 +191,7 @@
 ### D2. 性能优化优先级
 1. LP 构造阶段（CPU 端稀疏拼装）。
 2. 子图裁剪策略（减少变量/约束规模）。
-3. 与 InstantGR 的数据搬运开销。
+3. 新原型内部的数据搬运与 kernel 启动开销。
 
 ### D3. 参数扫描
 - `lambda`、子图大小、迭代次数、time limit。
@@ -206,7 +209,7 @@
 1. `codex/phase-a-baseline-harness`
 2. `codex/phase-b0-cupdlpx-direct-poc`
 3. `codex/phase-b-lp-ir-minimal`
-4. `codex/phase-c-instantgr-lp-integration`
+4. `codex/phase-c-router-lp-prototype`
 5. `codex/phase-d-tuning-and-regression`
 
 ## 3.2 提交粒度
@@ -248,7 +251,7 @@ Validation:
 
 ### Day 2
 1. 先做 `cuPDLPx` 最小直连 PoC（B0）。
-2. 搭 `lp_bridge` 目录与数据结构。
+2. 搭 `router_lp` 目录与数据结构。
 3. 实现最小 CSR 构造与维度校验。
 
 ### Day 3
@@ -260,7 +263,7 @@ Validation:
 2. 接入 evaluator，对比 baseline。
 
 ### Day 5
-1. main 增加 `--mode` 开关与 fallback。
+1. 新增 `router_lp` 入口的 `--mode` 开关与 fallback。
 2. 做一次完整小规模回归并归档结果。
 
 ---
@@ -271,10 +274,10 @@ Validation:
 - 应对：先 hotspot 子图 + net 分批 + 约束裁剪。
 
 2. 连续解不可直接布线：
-- 应对：两段式（LP 给引导 + 现有 detour 修复）。
+- 应对：两段式（LP 给引导 + 自研/借鉴 detour repair 修复）。
 
 3. 运行时回退不足：
-- 应对：所有新路径带 `--mode` 开关，默认 baseline。
+- 应对：`pure_lp` 失败时自动退化到 `lagrangian_path` 或 `repair-only`。
 
 4. 结果不可比较：
 - 应对：统一评估脚本 + 固定 case manifest。

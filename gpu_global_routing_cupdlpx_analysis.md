@@ -12,6 +12,14 @@
 
 > **如果目标是把 global routing 做成一个有明确理论支撑、且真正适合 GPU 的优化求解框架，那么“Pathfinding/Lagrangian 模型 + cuPDLPx/PDLP 这条线”是否成立？与现有 GPU global routing 相比，新意在哪里，边界在哪里，真正的技术难点又在哪里？**
 
+## 0.1 研究定位修正（独立工作）
+
+本项目定位为**独立新工作**，不是把 InstantGR 与 cuPDLPx 做代码融合：
+
+1. `InstantGR` 仅用于 baseline 对比与算法启发（如 RSMT、batch、detour、拥塞视图思想）。
+2. 新方法以 `cuPDLPx` 为核心 LP 求解后端，自建 `routing LP -> solve -> rounding/repair` 闭环。
+3. 工程实现上不修改、不链接 `InstantGR` 代码，避免耦合与归因不清。
+
 ---
 
 ## 1. 三份材料的核心信息
