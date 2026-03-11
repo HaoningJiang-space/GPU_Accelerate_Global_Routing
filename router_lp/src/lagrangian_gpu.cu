@@ -77,7 +77,7 @@ __global__ void bf_pass_kernel(
     const int*    __restrict__ d_layer_dir,
     const float*  __restrict__ d_layer_sc,
     float unit_wire_cost, float unit_via_cost,
-    int gX, int gY)
+    int gX, int gY, bool add_via)
 {
     int ni = blockIdx.x;
     const NetGPU& net = nets[ni];
@@ -129,13 +129,13 @@ __global__ void bf_pass_kernel(
             }
         }
         // Via up: (gx,gy,ll) -> (gx,gy,ll+1), via edge ei=(ll,gx,gy)
-        if (ll + 1 < L) {
+        if (add_via && ll + 1 < L) {
             int ei = ll * gX * gY + gx * gY + gy;
             int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
             atomicMin(dist + lx*by*L + ly*L + (ll+1), d_u + w);
         }
         // Via down: (gx,gy,ll) -> (gx,gy,ll-1), via edge ei=(ll-1,gx,gy)
-        if (ll > 0) {
+        if (add_via && ll > 0) {
             int ei = (ll-1) * gX * gY + gx * gY + gy;
             int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
             atomicMin(dist + lx*by*L + ly*L + (ll-1), d_u + w);
@@ -159,7 +159,7 @@ __global__ void trace_and_use_kernel(
     float* __restrict__ d_use_h,
     float* __restrict__ d_use_v,
     float* __restrict__ d_use_via,
-    int n_nets)
+    int n_nets, bool add_via)
 {
     int ni = blockIdx.x * blockDim.x + threadIdx.x;
     if (ni >= n_nets) return;
@@ -220,7 +220,7 @@ __global__ void trace_and_use_kernel(
                 atomicAdd(d_use_v + ei, 1.0f); cur = v; moved = true;
             }
         }
-        if (!moved && ll+1 < L) {
+        if (!moved && add_via && ll+1 < L) {
             int v  = lx*by*L + ly*L + (ll+1);
             int ei = ll*gX*gY + gx*gY + gy;
             int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
@@ -228,7 +228,7 @@ __global__ void trace_and_use_kernel(
                 atomicAdd(d_use_via + ei, 1.0f); cur = v; moved = true;
             }
         }
-        if (!moved && ll > 0) {
+        if (!moved && add_via && ll > 0) {
             int v  = lx*by*L + ly*L + (ll-1);
             int ei = (ll-1)*gX*gY + gx*gY + gy;
             int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
@@ -408,7 +408,7 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
                 ctx->d_nets, ctx->d_dist,
                 ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
                 ctx->d_layer_dir, ctx->d_layer_sc,
-                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY);
+                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY, ctx->add_via);
         }
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t1 = std::chrono::steady_clock::now();
@@ -423,25 +423,29 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
             ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
             ctx->d_layer_dir, ctx->d_layer_sc,
             ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
-            ctx->d_use_h, ctx->d_use_v, ctx->d_use_via, n_nets);
+            ctx->d_use_h, ctx->d_use_v, ctx->d_use_via, n_nets, ctx->add_via);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t2 = std::chrono::steady_clock::now();
         ctx->t_trace += std::chrono::duration<double>(t2 - t1).count();
 
-        // Step 4: Update lambda
-        update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_h,   ctx->d_use_h,   ctx->d_cap_h, alpha, LXY);
-        update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_v,   ctx->d_use_v,   ctx->d_cap_v, alpha, LXY);
-        if (ctx->add_via) {
-            update_lam_via_kernel<<<grid_upd, 256>>>(
-                ctx->d_lam_via, ctx->d_use_via, (float)ctx->via_cap, alpha, LXY);
+        // Step 4: Update lambda — skipped on the last iteration so that the
+        // final d_dist and d_lam_* remain consistent for path extraction.
+        if (iter < max_iters) {
+            update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_h,   ctx->d_use_h,   ctx->d_cap_h, alpha, LXY);
+            update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_v,   ctx->d_use_v,   ctx->d_cap_v, alpha, LXY);
+            if (ctx->add_via) {
+                update_lam_via_kernel<<<grid_upd, 256>>>(
+                    ctx->d_lam_via, ctx->d_use_via, (float)ctx->via_cap, alpha, LXY);
+            }
+            CUDA_CHECK(cudaDeviceSynchronize());
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
         auto t3 = std::chrono::steady_clock::now();
         ctx->t_lam  += std::chrono::duration<double>(t3 - t2).count();
         ctx->iters_run = iter;
 
-        // Violation report (downloads on log iterations only)
-        if (log_every > 0 && iter % log_every == 0) {
+        // Violation report: always on the last iteration, also on log checkpoints.
+        bool is_last = (iter == max_iters);
+        if (is_last || (log_every > 0 && iter % log_every == 0)) {
             std::vector<float> h_use_h(LXY), h_use_v(LXY), h_use_via(LXY);
             std::vector<float> h_cap_h(LXY), h_cap_v(LXY);
             CUDA_CHECK(cudaMemcpy(h_use_h.data(),   ctx->d_use_h,   LXY*4, cudaMemcpyDeviceToHost));
