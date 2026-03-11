@@ -143,6 +143,85 @@ __global__ void bf_pass_kernel(
     }
 }
 
+// Inner-loop BF kernel: runs all max_bf_iters passes in a single kernel launch.
+// One block per net; threads cooperate on that net's bbox dist[] in global memory.
+// __syncthreads() replaces the per-pass cudaDeviceSynchronize():
+//   - each net's dist[] is private to its block, so no inter-block dependency exists.
+//   - __syncthreads() ensures all atomicMin writes of pass k are visible before pass k+1.
+__global__ void bf_iters_kernel(
+    const NetGPU* __restrict__ nets,
+    int*          __restrict__ d_dist,
+    const float*  __restrict__ d_lam_h,
+    const float*  __restrict__ d_lam_v,
+    const float*  __restrict__ d_lam_via,
+    const int*    __restrict__ d_layer_dir,
+    const float*  __restrict__ d_layer_sc,
+    float unit_wire_cost, float unit_via_cost,
+    int gX, int gY, bool add_via, int max_bf_iters)
+{
+    int ni = blockIdx.x;
+    const NetGPU& net = nets[ni];
+    int* dist = d_dist + net.dist_offset;
+    const int bx = net.bx, by = net.by, L = net.L;
+    const int n_local = net.n_local;
+
+    for (int pass = 0; pass < max_bf_iters; ++pass) {
+        for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x) {
+            int d_u = dist[li];
+            if (d_u >= INF_DIST) continue;
+
+            int ll  = li % L;
+            int tmp = li / L;
+            int ly  = tmp % by;
+            int lx  = tmp / by;
+            int gx  = lx + net.x0;
+            int gy  = ly + net.y0;
+
+            float base_wire = unit_wire_cost * d_layer_sc[ll];
+            float base_via  = unit_via_cost;
+            int   dir       = d_layer_dir[ll];
+
+            if (dir == 0) {
+                if (lx + 1 < bx) {
+                    int ei = ll * gX * gY + gx * gY + gy;
+                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
+                    atomicMin(dist + (lx+1)*by*L + ly*L + ll, d_u + w);
+                }
+                if (lx > 0) {
+                    int ei = ll * gX * gY + (gx-1) * gY + gy;
+                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
+                    atomicMin(dist + (lx-1)*by*L + ly*L + ll, d_u + w);
+                }
+            }
+            if (dir == 1) {
+                if (ly + 1 < by) {
+                    int ei = ll * gX * gY + gx * gY + gy;
+                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
+                    atomicMin(dist + lx*by*L + (ly+1)*L + ll, d_u + w);
+                }
+                if (ly > 0) {
+                    int ei = ll * gX * gY + gx * gY + (gy-1);
+                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
+                    atomicMin(dist + lx*by*L + (ly-1)*L + ll, d_u + w);
+                }
+            }
+            if (add_via && ll + 1 < L) {
+                int ei = ll * gX * gY + gx * gY + gy;
+                int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
+                atomicMin(dist + lx*by*L + ly*L + (ll+1), d_u + w);
+            }
+            if (add_via && ll > 0) {
+                int ei = (ll-1) * gX * gY + gx * gY + gy;
+                int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
+                atomicMin(dist + lx*by*L + ly*L + (ll-1), d_u + w);
+            }
+        }
+        // Barrier: all threads in this block must finish atomicMin writes before
+        // the next pass reads dist[].  Safe because dist[] is private to this block.
+        __syncthreads();
+    }
+}
+
 // Trace path snk->src per net (one thread per net), accumulate edge usage.
 // Exact integer equality dist[v]+w == dist[cur] is valid because both BF and
 // trace use the same lambda values and the same integer truncation formula.
@@ -402,14 +481,15 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         reset_int_kernel<<<grid_reset, 256>>>(ctx->d_dist, ctx->total_dist_nodes, INF_DIST);
         init_src_kernel<<<n_nets, 1>>>(ctx->d_nets, ctx->d_dist);
 
-        // Step 2: Repeated BF passes
-        for (int pass = 0; pass < ctx->max_bf_iters; ++pass) {
-            bf_pass_kernel<<<n_nets, 256>>>(
-                ctx->d_nets, ctx->d_dist,
-                ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
-                ctx->d_layer_dir, ctx->d_layer_sc,
-                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY, ctx->add_via);
-        }
+        // Step 2: Single kernel launch runs all BF passes internally.
+        // Each net's block loops max_bf_iters times with __syncthreads() between passes,
+        // replacing the previous host-side loop of max_bf_iters separate kernel launches.
+        bf_iters_kernel<<<n_nets, 256>>>(
+            ctx->d_nets, ctx->d_dist,
+            ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+            ctx->d_layer_dir, ctx->d_layer_sc,
+            ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+            ctx->add_via, ctx->max_bf_iters);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t1 = std::chrono::steady_clock::now();
         ctx->t_bf += std::chrono::duration<double>(t1 - t0).count();
