@@ -37,7 +37,7 @@ int main(int argc, char* argv[]) {
     std::string config_path = "config/cupdlpx_routing_default.yaml";
     int    max_nets   = 0;
     int    max_hpwl   = 40;
-    int    gpu_id     = 0;
+    int    gpu_id     = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
     double threshold  = 0.1;
     bool   add_via    = true;
 
@@ -64,10 +64,18 @@ int main(int argc, char* argv[]) {
         usage(argv[0]); return 1;
     }
 
-    // Set GPU device
-    std::string cuda_dev = std::to_string(gpu_id);
-    setenv("CUDA_VISIBLE_DEVICES", cuda_dev.c_str(), 1);
-    std::cout << "[main] GPU=" << gpu_id
+    // GPU device: only override CUDA_VISIBLE_DEVICES when --gpu was explicitly given.
+    // Otherwise inherit the caller's environment (allows script/CI-level pinning).
+    std::string gpu_label;
+    if (gpu_id >= 0) {
+        std::string cuda_dev = std::to_string(gpu_id);
+        setenv("CUDA_VISIBLE_DEVICES", cuda_dev.c_str(), 1);
+        gpu_label = cuda_dev;
+    } else {
+        const char* env_dev = getenv("CUDA_VISIBLE_DEVICES");
+        gpu_label = (env_dev && env_dev[0]) ? env_dev : "(default)";
+    }
+    std::cout << "[main] CUDA_VISIBLE_DEVICES=" << gpu_label
               << "  cap=" << cap_path
               << "  net=" << net_path << "\n";
 

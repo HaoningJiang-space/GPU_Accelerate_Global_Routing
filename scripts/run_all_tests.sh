@@ -64,10 +64,10 @@ else
     BIN="${REPO}/router_lp/router_lp"
     [[ -f "${BIN}" ]] || bash "${REPO}/scripts/build_router_lp.sh"
 
-    CUDA_VISIBLE_DEVICES="${GPU_ID}" timeout 120 "${BIN}" \
+    timeout 120 "${BIN}" \
         -cap "${CAP}" -net "${NET}" -out "${OUT}" \
         --max-nets 500 --max-hpwl 30 \
-        --config "${REPO}/router_lp/config/cupdlpx_routing_default.yaml" \
+        --gpu "${GPU_ID}" --config "${REPO}/router_lp/config/cupdlpx_routing_default.yaml" \
         > /tmp/b1_smoke.txt 2>&1 || true
 
     if grep -F "routed_nets" /tmp/b1_smoke.txt > /dev/null; then
