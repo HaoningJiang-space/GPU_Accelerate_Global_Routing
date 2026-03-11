@@ -19,6 +19,11 @@ std::vector<NetRoute> run_windowed_routing(
 
     const int WX = cfg.window_x;
     const int WY = cfg.window_y;
+    if (WX <= 0 || WY <= 0) {
+        std::cerr << "[windowed] Invalid window size: window_x=" << WX
+                  << " window_y=" << WY << " (must be > 0)\n";
+        return {};
+    }
     const int nWX = (grid.X + WX - 1) / WX;
     const int nWY = (grid.Y + WY - 1) / WY;
 
@@ -27,7 +32,9 @@ std::vector<NetRoute> run_windowed_routing(
 
     // ── Assign each 2-pin net to the window containing BOTH endpoints ─────────
     // bucket[wi*nWY + wj] = list of net indices assigned to window (wi,wj)
+    // assigned[ni] = true once a net is placed in a bucket
     std::vector<std::vector<int>> buckets(nWX * nWY);
+    std::vector<bool> assigned(twonets.size(), false);
     int n_unassigned = 0;
 
     for (int ni = 0; ni < (int)twonets.size(); ++ni) {
@@ -35,10 +42,12 @@ std::vector<NetRoute> run_windowed_routing(
         int wsx = t.src.loc.x / WX, wsy = t.src.loc.y / WY;
         int wdx = t.snk.loc.x / WX, wdy = t.snk.loc.y / WY;
 
-        if (wsx == wdx && wsy == wdy)
+        if (wsx == wdx && wsy == wdy) {
             buckets[wsx * nWY + wsy].push_back(ni);
-        else
+            assigned[ni] = true;
+        } else {
             ++n_unassigned;
+        }
     }
 
     stats.n_nets_unassigned = n_unassigned;
@@ -138,6 +147,16 @@ std::vector<NetRoute> run_windowed_routing(
 
     stats.total_wall_time = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - wall0).count();
+
+    // Append empty (disconnected) NetRoute for every unassigned net so that
+    // the output file has one entry per input 2-pin net.
+    for (int ni = 0; ni < (int)twonets.size(); ++ni) {
+        if (!assigned[ni]) {
+            NetRoute r;
+            r.name = twonets[ni].name;
+            all_routes.push_back(std::move(r));
+        }
+    }
 
     std::cout << "[windowed] Done:"
               << " windows=" << stats.n_windows_total
