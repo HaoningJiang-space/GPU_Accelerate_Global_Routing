@@ -52,8 +52,8 @@ else
 fi
 
 # ── Stage 3: B1 smoke (small benchmark) ──────────────────────────────────────
-stage "B1 smoke (mempool_tile_rank, --max-nets 6 --max-hpwl 20)"
-BENCH="${REPO}/benchmarks/mempool_tile_rank"
+stage "B1 smoke (mempool_tile_rank, --max-nets 500 --max-hpwl 30)"
+BENCH="${REPO}/InstantGR/benchmarks"
 CAP="${BENCH}/mempool_tile_rank.cap"
 NET="${BENCH}/mempool_tile_rank.net"
 OUT="/tmp/b1_smoke_out.out"
@@ -66,7 +66,7 @@ else
 
     CUDA_VISIBLE_DEVICES="${GPU_ID}" timeout 120 "${BIN}" \
         -cap "${CAP}" -net "${NET}" -out "${OUT}" \
-        --max-nets 6 --max-hpwl 20 \
+        --max-nets 500 --max-hpwl 30 \
         --config "${REPO}/router_lp/config/cupdlpx_routing_default.yaml" \
         > /tmp/b1_smoke.txt 2>&1 || true
 
