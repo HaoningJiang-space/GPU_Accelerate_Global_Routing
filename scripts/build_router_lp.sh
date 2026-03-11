@@ -37,7 +37,7 @@ nvcc -std=c++17 ${NVCC_OPT} \
 
 # Step 2: compile and link C++ sources with g++, adding GPU object + cudart
 echo "[build] Compiling router_lp..."
-g++ -std=c++17 ${OPT} -Wall -Wextra -Werror \
+g++ -std=c++17 ${OPT} -Wall -Wextra -Werror -fopenmp \
     "${SRCS[@]}" \
     "${GPU_OBJ}" \
     -I "${REPO}/router_lp/include" \

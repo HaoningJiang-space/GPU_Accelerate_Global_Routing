@@ -9,6 +9,7 @@
 #include <iostream>
 #include <queue>
 #include <vector>
+#include <omp.h>
 
 namespace rlp {
 
@@ -242,18 +243,22 @@ std::vector<NetRoute> run_lagrangian_routing(
     // Store current iteration paths for each net
     std::vector<std::vector<PathSeg>> paths(n_nets);
 
+    int n_threads = omp_get_max_threads();
     std::cout << "[lagrangian] " << n_nets << " nets, grid "
               << L << "x" << X << "x" << Y
               << "  iters=" << cfg.max_iters
               << "  step=" << cfg.step_size
               << "  decay=" << cfg.step_decay
-              << "  margin=" << cfg.margin << "\n";
+              << "  margin=" << cfg.margin
+              << "  omp_threads=" << n_threads << "\n";
 
     // ── Subgradient iterations ────────────────────────────────────────────────
     for (int iter = 1; iter <= cfg.max_iters; ++iter) {
 
-        // ── Step 1: Per-net shortest path ─────────────────────────────────────
+        // ── Step 1: Per-net shortest path (embarrassingly parallel) ───────────
+        // lam_h/v/via are read-only in this step; each paths[ni] is independent.
         auto t_dijk0 = std::chrono::steady_clock::now();
+        #pragma omp parallel for schedule(dynamic, 32)
         for (int ni = 0; ni < n_nets; ++ni) {
             paths[ni] = dijkstra_net(twonets[ni], grid, cfg,
                                      lam_h, lam_v, lam_via);
@@ -268,12 +273,22 @@ std::vector<NetRoute> run_lagrangian_routing(
         std::fill(use_v.begin(),   use_v.end(),   0.0f);
         std::fill(use_via.begin(), use_via.end(), 0.0f);
 
+        // Paths are independent per net; use atomic increments so threads can
+        // accumulate into shared use_* arrays without races.
+        #pragma omp parallel for schedule(static)
         for (int ni = 0; ni < n_nets; ++ni) {
             for (const auto& seg : paths[ni]) {
                 int idx = edge_idx(seg.l, seg.x, seg.y, X, Y);
-                if      (seg.dir == EdgeDir::H)   use_h  [idx] += 1.0f;
-                else if (seg.dir == EdgeDir::V)   use_v  [idx] += 1.0f;
-                else                              use_via[idx] += 1.0f;
+                if (seg.dir == EdgeDir::H) {
+                    #pragma omp atomic
+                    use_h[idx] += 1.0f;
+                } else if (seg.dir == EdgeDir::V) {
+                    #pragma omp atomic
+                    use_v[idx] += 1.0f;
+                } else {
+                    #pragma omp atomic
+                    use_via[idx] += 1.0f;
+                }
             }
         }
 
