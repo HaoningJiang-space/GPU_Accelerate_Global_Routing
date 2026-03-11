@@ -1,15 +1,14 @@
 // router_lp/src/solution_rounding.cpp
 // B4: Round fractional LP solution to paths and write .out file.
 //
-// Algorithm: flow decomposition DFS.
+// Algorithm: BFS-based single-path extraction per 2-pin net.
 //   For each 2-pin net n:
-//   1. Build a residual directed adjacency list from the LP solution.
-//      Forward arc  (tail→head) if x[n,e,0] > threshold.
-//      Backward arc (head→tail) if x[n,e,1] > threshold.
-//   2. Repeatedly trace a path from src to snk by greedy DFS (highest flow first).
-//      After tracing, subtract the bottleneck flow and emit segments.
-//   3. Repeat until the total flow out of src < threshold.
-//   This guarantees connected src→snk paths for each net.
+//   1. Build directed adjacency from the LP solution (fwd/bwd arcs above threshold).
+//   2. BFS from src to snk — strict visited set, O(V+E), no cycles, no backtracking.
+//   3. Emit the single path found. For 2-pin nets one connected path is sufficient.
+//
+//   Replaces the previous backtracking DFS which could loop indefinitely on cyclic
+//   residual graphs (visited[u]=false on backtrack + positive residuals = infinite loop).
 
 #include "../include/solution_rounding.hpp"
 #include <fstream>
@@ -17,67 +16,66 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <stack>
+#include <queue>
 
 namespace rlp {
 
-// ── Flow decomposition ───────────────────────────────────────────────────────
+// ── Arc structure ─────────────────────────────────────────────────────────────
 
 struct Arc {
     int to;       // destination subgraph node
     int edge_idx; // index into prob.edges
-    double* flow; // pointer into mutable flow array (fwd or bwd)
+    double flow;  // flow value (copy, not pointer — adjacency rebuilt per net)
     bool fwd;     // direction flag (for segment orientation)
 };
 
-// Greedy DFS path from src_sub to snk_sub.
-// Returns path as sequence of arcs. Returns empty if no path.
-static std::vector<Arc*> dfs_path(
+// BFS path from src to snk. Strict visited set — guaranteed O(V+E) termination.
+// Prefers heavier arcs at each node (sort cands desc before enqueuing).
+// Returns sequence of (edge_idx, fwd) for the path, empty if unreachable.
+struct PathStep { int edge_idx; bool fwd; };
+
+static std::vector<PathStep> bfs_path(
     int src, int snk,
-    std::vector<std::vector<Arc>>& adj,
+    const std::vector<std::vector<Arc>>& adj,
     double threshold)
 {
-    int n_nodes = (int)adj.size();
-    std::vector<int> parent(n_nodes, -1);
-    std::vector<Arc*> parent_arc(n_nodes, nullptr);
-    std::vector<bool> visited(n_nodes, false);
+    int n = (int)adj.size();
+    std::vector<bool> visited(n, false);
+    std::vector<int>  parent(n, -1);
+    std::vector<int>  parent_eidx(n, -1);
+    std::vector<bool> parent_fwd(n, false);
 
-    // Iterative DFS; at each node pick the unvisited neighbor with highest flow
-    std::stack<int> stk;
-    stk.push(src);
+    std::queue<int> q;
+    q.push(src);
     visited[src] = true;
 
-    while (!stk.empty()) {
-        int u = stk.top();
+    while (!q.empty()) {
+        int u = q.front(); q.pop();
         if (u == snk) break;
 
-        // Find best unvisited outgoing arc
-        Arc* best = nullptr;
-        double best_f = threshold;
-        for (auto& a : adj[u]) {
-            if (!visited[a.to] && *a.flow > best_f) {
-                best_f = *a.flow;
-                best = &a;
-            }
+        // Collect and sort unvisited neighbours by flow (desc) for greedy quality
+        std::vector<const Arc*> cands;
+        for (const auto& a : adj[u])
+            if (!visited[a.to] && a.flow > threshold)
+                cands.push_back(&a);
+        std::sort(cands.begin(), cands.end(),
+                  [](const Arc* x, const Arc* y){ return x->flow > y->flow; });
+
+        for (const Arc* a : cands) {
+            if (visited[a->to]) continue;
+            visited[a->to]    = true;
+            parent[a->to]     = u;
+            parent_eidx[a->to] = a->edge_idx;
+            parent_fwd[a->to]  = a->fwd;
+            q.push(a->to);
         }
-        if (!best) {
-            // Dead end — backtrack
-            stk.pop();
-            if (!stk.empty()) visited[u] = false;  // allow revisiting from other branches
-            continue;
-        }
-        parent[best->to]     = u;
-        parent_arc[best->to] = best;
-        visited[best->to]    = true;
-        stk.push(best->to);
     }
 
     if (!visited[snk]) return {};
 
-    // Reconstruct path from snk back to src
-    std::vector<Arc*> path;
+    std::vector<PathStep> path;
     for (int v = snk; v != src; v = parent[v])
-        path.push_back(parent_arc[v]);
+        path.push_back({parent_eidx[v], parent_fwd[v]});
     std::reverse(path.begin(), path.end());
     return path;
 }
@@ -99,55 +97,37 @@ static std::vector<RoutingSegment> extract_net_path(
         return {};
     }
 
-    // Mutable local copy of this net's flows [n_edges * 2]
     int base = n * n_edges * 2;
-    std::vector<double> flow(sol_x.begin() + base, sol_x.begin() + base + n_edges * 2);
 
-    // Build adjacency list (arcs with pointers into 'flow')
+    // Build adjacency list (value-copy of flows — no pointer aliasing)
     std::vector<std::vector<Arc>> adj(n_nodes);
     for (int e = 0; e < n_edges; ++e) {
         int t = prob.edge_tail_sub[e];
         int h = prob.edge_head_sub[e];
-        // forward arc
-        adj[t].push_back({h, e, &flow[e * 2 + 0], true});
-        // backward arc
-        adj[h].push_back({t, e, &flow[e * 2 + 1], false});
+        double fflow = sol_x[base + e * 2 + 0];
+        double bflow = sol_x[base + e * 2 + 1];
+        if (fflow > threshold) adj[t].push_back({h, e, fflow, true});
+        if (bflow > threshold) adj[h].push_back({t, e, bflow, false});
     }
+
+    auto path = bfs_path(src_sub, snk_sub, adj, threshold);
+    if (path.empty()) return {};
 
     const auto& edges = prob.edges;
     std::vector<RoutingSegment> segs;
-
-    // Flow decomposition: trace paths until net outflow is exhausted
-    for (int iter = 0; iter < n_edges + 1; ++iter) {
-        // Check remaining outflow from src
-        double out = 0.0;
-        for (auto& a : adj[src_sub]) out += *a.flow;
-        if (out <= threshold) break;
-
-        auto path = dfs_path(src_sub, snk_sub, adj, threshold);
-        if (path.empty()) break;
-
-        // Bottleneck flow along path
-        double bot = 1e9;
-        for (Arc* a : path) bot = std::min(bot, *a->flow);
-        bot = std::max(bot, threshold);
-
-        // Subtract flow and collect segments
-        for (Arc* a : path) {
-            *a->flow -= bot;
-            const Edge& e = edges[a->edge_idx];
-            RoutingSegment s;
-            if (a->fwd) {
-                s.x1 = e.xl; s.y1 = e.yl; s.z1 = e.ll;
-                s.x2 = e.xh; s.y2 = e.yh; s.z2 = e.lh;
-            } else {
-                s.x1 = e.xh; s.y1 = e.yh; s.z1 = e.lh;
-                s.x2 = e.xl; s.y2 = e.yl; s.z2 = e.ll;
-            }
-            segs.push_back(s);
+    segs.reserve(path.size());
+    for (const auto& step : path) {
+        const Edge& e = edges[step.edge_idx];
+        RoutingSegment s;
+        if (step.fwd) {
+            s.x1 = e.xl; s.y1 = e.yl; s.z1 = e.ll;
+            s.x2 = e.xh; s.y2 = e.yh; s.z2 = e.lh;
+        } else {
+            s.x1 = e.xh; s.y1 = e.yh; s.z1 = e.lh;
+            s.x2 = e.xl; s.y2 = e.yl; s.z2 = e.ll;
         }
+        segs.push_back(s);
     }
-
     return segs;
 }
 

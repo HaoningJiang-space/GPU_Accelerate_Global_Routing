@@ -154,7 +154,11 @@ bool read_net_file(const std::string& path, const GridInfo& grid,
             if (buf[pos] != '[') { ++pos; continue; }
             ++pos;  // consume '['
 
-            // Read first (l,x,y) triplet in this pin group
+            // Read first (l,x,y) triplet in this pin group.
+            // NOTE (P2): Only the first access point is used; alternatives are discarded.
+            //   This simplifies implementation but reduces routability when benchmarks
+            //   encode multiple equivalent access points per pin. A future improvement
+            //   would select the access point closest to the net's bounding box centre.
             int l, x, y;
             if (read_triplet(buf, pos, l, x, y)) {
                 if (l >= 0 && l < grid.L && x >= 0 && x < grid.X &&
