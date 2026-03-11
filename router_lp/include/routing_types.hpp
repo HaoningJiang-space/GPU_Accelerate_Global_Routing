@@ -33,7 +33,8 @@ struct Pin {
 
 // A 2-pin net after FLUTE decomposition (or directly 2-pin from file)
 struct TwoNet {
-    std::string name;
+    std::string name;      // decomposed 2-pin name: "orig_name_N"
+    std::string orig_name; // original multi-pin net name (for output grouping)
     Pin src, snk;
 };
 

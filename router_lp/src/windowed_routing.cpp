@@ -81,7 +81,8 @@ std::vector<NetRoute> run_windowed_routing(
             auto push_disconnected = [&]() {
                 for (const auto& tn : window_nets) {
                     NetRoute r;
-                    r.name = tn.name;
+                    r.name      = tn.name;
+                    r.orig_name = tn.orig_name;
                     all_routes.push_back(std::move(r));
                 }
                 stats.n_nets_disconnected += (int)window_nets.size();
@@ -153,7 +154,8 @@ std::vector<NetRoute> run_windowed_routing(
     for (int ni = 0; ni < (int)twonets.size(); ++ni) {
         if (!assigned[ni]) {
             NetRoute r;
-            r.name = twonets[ni].name;
+            r.name      = twonets[ni].name;
+            r.orig_name = twonets[ni].orig_name;
             all_routes.push_back(std::move(r));
         }
     }

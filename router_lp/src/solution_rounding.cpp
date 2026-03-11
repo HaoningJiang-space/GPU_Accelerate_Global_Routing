@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <queue>
+#include <unordered_map>
 
 namespace rlp {
 
@@ -142,7 +143,8 @@ std::vector<NetRoute> round_lp_solution(const RoutingLPProblem& prob,
 
     for (int n = 0; n < prob.n_nets; ++n) {
         NetRoute nr;
-        nr.name     = prob.nets[n].name;
+        nr.name      = prob.nets[n].name;
+        nr.orig_name = prob.nets[n].orig_name;
         nr.segments = extract_net_path(n, prob, sol.x, threshold);
         routes.push_back(std::move(nr));
     }
@@ -159,14 +161,36 @@ bool write_out_file(const std::string& path, const std::vector<NetRoute>& routes
         std::cerr << "[rounding] Cannot open output file: " << path << "\n";
         return false;
     }
+
+    // Group 2-pin subroutes by original multi-pin net name.
+    // Use insertion-order tracking to preserve output order.
+    // If orig_name is empty (LP mode without decomposition), fall back to name.
+    std::vector<std::string> order;
+    std::unordered_map<std::string, std::vector<const NetRoute*>> groups;
     for (const auto& r : routes) {
-        f << r.name << "\n(\n";
-        for (const auto& s : r.segments)
-            f << s.x1 << " " << s.y1 << " " << s.z1 << " "
-              << s.x2 << " " << s.y2 << " " << s.z2 << "\n";
-        f << ")\n";
+        const std::string& key = r.orig_name.empty() ? r.name : r.orig_name;
+        if (groups.find(key) == groups.end()) order.push_back(key);
+        groups[key].push_back(&r);
     }
-    std::cout << "[rounding] Wrote " << routes.size() << " nets to " << path << "\n";
+
+    int written = 0;
+    for (const auto& key : order) {
+        const auto& group = groups[key];
+        // Collect all segments from all subroutes
+        bool any_segment = false;
+        for (const NetRoute* r : group)
+            if (!r->segments.empty()) { any_segment = true; break; }
+        if (!any_segment) continue;  // skip fully disconnected nets
+
+        f << key << "\n(\n";
+        for (const NetRoute* r : group)
+            for (const auto& s : r->segments)
+                f << s.x1 << " " << s.y1 << " " << s.z1 << " "
+                  << s.x2 << " " << s.y2 << " " << s.z2 << "\n";
+        f << ")\n";
+        ++written;
+    }
+    std::cout << "[rounding] Wrote " << written << " nets to " << path << "\n";
     return true;
 }
 

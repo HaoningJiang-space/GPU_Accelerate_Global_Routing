@@ -226,7 +226,8 @@ std::vector<TwoNet> decompose_to_2pin(const MultiPinNet& mnet) {
     const GCell& root = mnet.pins[0];
     for (int i = 1; i < (int)mnet.pins.size(); ++i) {
         TwoNet tn;
-        tn.name = mnet.name + "_" + std::to_string(i);
+        tn.name      = mnet.name + "_" + std::to_string(i);
+        tn.orig_name = mnet.name;
         tn.src  = Pin{root};
         tn.snk  = Pin{mnet.pins[i]};
         result.push_back(std::move(tn));

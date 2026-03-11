@@ -55,7 +55,7 @@ static bool solve_batch(
     if (!can_round) {
         ++stats.n_batches_skipped;
         for (const auto& tn : batch) {
-            NetRoute r; r.name = tn.name;
+            NetRoute r; r.name = tn.name; r.orig_name = tn.orig_name;
             result_routes.push_back(std::move(r));
         }
         stats.n_nets_disconnected += (int)batch.size();
@@ -129,7 +129,7 @@ std::vector<NetRoute> run_adaptive_routing(
                 if (!single_ok) {
                     // Even single-net solve rejected (net span > MAX_VARS limit)
                     ++stats.n_batches_skipped;
-                    NetRoute r; r.name = batch[k].name;
+                    NetRoute r; r.name = batch[k].name; r.orig_name = batch[k].orig_name;
                     single_routes.push_back(std::move(r));
                     ++stats.n_nets_disconnected;
                 }
@@ -148,7 +148,8 @@ std::vector<NetRoute> run_adaptive_routing(
     // Sanity: every net must have a route entry
     for (int ni = 0; ni < (int)twonets.size(); ++ni) {
         if (!filled[ni]) {
-            all_routes[ni].name = twonets[ni].name;
+            all_routes[ni].name      = twonets[ni].name;
+            all_routes[ni].orig_name = twonets[ni].orig_name;
             ++stats.n_nets_disconnected;
         }
     }

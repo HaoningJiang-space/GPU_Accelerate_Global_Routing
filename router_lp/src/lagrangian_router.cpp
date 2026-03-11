@@ -199,7 +199,8 @@ static NetRoute path_to_route(const TwoNet& net,
                                const std::vector<PathSeg>& path)
 {
     NetRoute r;
-    r.name = net.name;
+    r.name      = net.name;
+    r.orig_name = net.orig_name;
     for (const auto& seg : path) {
         RoutingSegment s;
         s.x1 = seg.x; s.y1 = seg.y; s.z1 = seg.l;
@@ -353,7 +354,7 @@ std::vector<NetRoute> run_lagrangian_routing(
     for (int ni = 0; ni < n_nets; ++ni) {
         if (paths[ni].empty()) {
             ++stats.n_nets_disconnected;
-            NetRoute r; r.name = twonets[ni].name;
+            NetRoute r; r.name = twonets[ni].name; r.orig_name = twonets[ni].orig_name;
             routes.push_back(std::move(r));
         } else {
             ++stats.n_nets_routed;

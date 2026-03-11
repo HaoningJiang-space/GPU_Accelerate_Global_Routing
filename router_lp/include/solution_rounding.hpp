@@ -27,7 +27,8 @@ struct RoutingSegment {
 };
 
 struct NetRoute {
-    std::string name;
+    std::string name;      // 2-pin decomposed name
+    std::string orig_name; // original multi-pin net name
     std::vector<RoutingSegment> segments;
 };
 

@@ -783,7 +783,8 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
         const int x0 = ng.x0, y0 = ng.y0;
 
         NetRoute r;
-        r.name = twonets[ni].name;
+        r.name      = twonets[ni].name;
+        r.orig_name = twonets[ni].orig_name;
 
         if (dist[ng.snk_li] >= INF_DIST) {
             routes.push_back(std::move(r));
