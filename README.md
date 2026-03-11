@@ -302,9 +302,13 @@ Host↔Device transfers:
 | B3+ | Lagrangian GPU parallel BF (`--lag-gpu`) | Done |
 | v1  | Inner BF loop (50 kernel launches vs 12800) | Done |
 | v1  | GPU quality parity (eps + dispersion + EMA → max_viol matches CPU) | Done |
-| v2  | Bbox bucketing + shared memory for small nets (n_local ≤ 2048) | Done |
-| v3  | CUDA Graph batch submission | Planned |
-| v3  | Full-scale Lagrangian + cuPDLPx hotspot polishing | Planned |
+| v2  | Bbox bucketing + shared memory for small nets (n_local ≤ 8192) | Done |
+| v2  | `--lag-iters 0` GPU/CPU semantic parity | Done |
+| v3  | Multi-pin output reassembly (orig_name grouping, evaluator-compatible) | Done |
+| v3  | Disconnected net repair (Dijkstra λ=0 fallback, `--no-repair`) | Done |
+| v3  | cuPDLPx hotspot polish (`--lag-polish`): bbox filter + LP merge | Done |
+| v3  | Paper experiment matrix script (`scripts/run_experiment_matrix.sh`) | Done |
+| v4  | CUDA Graph batch submission | Planned |
 
 ---
 
