@@ -10,15 +10,83 @@ cases:
     net: InstantGR/benchmarks/mempool_tile_rank.net
     out: results/baseline/mempool_tile_rank/route.out
 
-  # Uncomment and fill in paths when ISPD2024 cases are downloaded:
-  # - name: ispd24_case1
-  #   tier: small
-  #   cap: benchmarks/ispd24/case1.cap
-  #   net: benchmarks/ispd24/case1.net
-  #   out: results/baseline/ispd24_case1/route.out
+  # ISPD2024 benchmarks — download with: python scripts/download_ispd2024_benchmarks.py
 
-  # - name: ispd24_case2
-  #   tier: medium
-  #   cap: benchmarks/ispd24/case2.cap
-  #   net: benchmarks/ispd24/case2.net
-  #   out: results/baseline/ispd24_case2/route.out
+  - name: mempool_tile
+    tier: small
+    cap: benchmarks/ispd2024/mempool_tile.cap
+    net: benchmarks/ispd2024/mempool_tile.net
+    out: results/baseline/mempool_tile/route.out
+
+  - name: mempool_tile_rank_ispd
+    tier: small
+    cap: benchmarks/ispd2024/mempool_tile_rank.cap
+    net: benchmarks/ispd2024/mempool_tile_rank.net
+    out: results/baseline/mempool_tile_rank_ispd/route.out
+
+  - name: ariane133_51
+    tier: small
+    cap: benchmarks/ispd2024/ariane133_51.cap
+    net: benchmarks/ispd2024/ariane133_51.net
+    out: results/baseline/ariane133_51/route.out
+
+  - name: ariane133_68
+    tier: small
+    cap: benchmarks/ispd2024/ariane133_68.cap
+    net: benchmarks/ispd2024/ariane133_68.net
+    out: results/baseline/ariane133_68/route.out
+
+  - name: ariane_68_rank
+    tier: small
+    cap: benchmarks/ispd2024/ariane_68_rank.cap
+    net: benchmarks/ispd2024/ariane_68_rank.net
+    out: results/baseline/ariane_68_rank/route.out
+
+  - name: nvdla
+    tier: small
+    cap: benchmarks/ispd2024/nvdla.cap
+    net: benchmarks/ispd2024/nvdla.net
+    out: results/baseline/nvdla/route.out
+
+  - name: nvdla_rank
+    tier: small
+    cap: benchmarks/ispd2024/nvdla_rank.cap
+    net: benchmarks/ispd2024/nvdla_rank.net
+    out: results/baseline/nvdla_rank/route.out
+
+  - name: bsg_chip
+    tier: medium
+    cap: benchmarks/ispd2024/bsg_chip.cap
+    net: benchmarks/ispd2024/bsg_chip.net
+    out: results/baseline/bsg_chip/route.out
+
+  - name: bsg_chip_rank
+    tier: medium
+    cap: benchmarks/ispd2024/bsg_chip_rank.cap
+    net: benchmarks/ispd2024/bsg_chip_rank.net
+    out: results/baseline/bsg_chip_rank/route.out
+
+  - name: mempool_group
+    tier: medium
+    cap: benchmarks/ispd2024/mempool_group.cap
+    net: benchmarks/ispd2024/mempool_group.net
+    out: results/baseline/mempool_group/route.out
+
+  - name: mempool_group_rank
+    tier: medium
+    cap: benchmarks/ispd2024/mempool_group_rank.cap
+    net: benchmarks/ispd2024/mempool_group_rank.net
+    out: results/baseline/mempool_group_rank/route.out
+
+  # Large cases (~10GB net files) — run selectively
+  # - name: mempool_cluster
+  #   tier: large
+  #   cap: benchmarks/ispd2024/mempool_cluster.cap
+  #   net: benchmarks/ispd2024/mempool_cluster.net
+  #   out: results/baseline/mempool_cluster/route.out
+
+  # - name: tera_cluster
+  #   tier: large
+  #   cap: benchmarks/ispd2024/tera_cluster.cap
+  #   net: benchmarks/ispd2024/tera_cluster.net
+  #   out: results/baseline/tera_cluster/route.out

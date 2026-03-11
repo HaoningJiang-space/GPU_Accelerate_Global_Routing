@@ -1,2 +1,7 @@
 InstantGR/run/InstantGR
 InstantGR/run/evaluator
+
+# Large benchmark data files (download with scripts/download_ispd2024_benchmarks.py)
+benchmarks/ispd2024/
+results/baseline/*/route.out
+results/baseline/*/runtime.txt
