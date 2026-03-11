@@ -84,7 +84,19 @@ bool solve_routing_lp(const RoutingLPProblem& prob,
         }
     }
 
-    // 2. Build matrix descriptor (CSR)
+    // 2. Log problem size and active GPU device
+    {
+        const char* dev = getenv("CUDA_VISIBLE_DEVICES");
+        std::cout << "[cupdlpx_adapter] GPU device: CUDA_VISIBLE_DEVICES="
+                  << (dev ? dev : "(unset/default)") << "\n"
+                  << "[cupdlpx_adapter] Problem: n_vars=" << prob.n_vars
+                  << " n_cons=" << prob.n_cons
+                  << " nnz=" << prob.csr_col.size()
+                  << " n_nets=" << prob.n_nets
+                  << " n_edges=" << prob.n_edges << "\n";
+    }
+
+    // 3. Build matrix descriptor (CSR)
     matrix_desc_t A_desc;
     A_desc.m   = prob.n_cons;
     A_desc.n   = prob.n_vars;
