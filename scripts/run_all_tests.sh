@@ -68,15 +68,26 @@ else
         -cap "${CAP}" -net "${NET}" -out "${OUT}" \
         --max-nets 500 --max-hpwl 30 \
         --gpu "${GPU_ID}" --config "${REPO}/router_lp/config/cupdlpx_routing_default.yaml" \
-        > /tmp/b1_smoke.txt 2>&1 || true
+        > /tmp/b1_smoke.txt 2>&1
+    B1_RC=$?
 
-    if grep -F "routed_nets" /tmp/b1_smoke.txt > /dev/null; then
-        routed=$(grep "routed_nets" /tmp/b1_smoke.txt | awk -F': ' '{print $2}')
-        solve_t=$(grep "solve_time" /tmp/b1_smoke.txt | tail -1 | awk -F': ' '{print $2}')
-        ok "B1 smoke: routed_nets=${routed} solve_time=${solve_t}"
+    routed=$(grep "^  routed_nets" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
+    disconn=$(grep "^  disconnected" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
+    solve_t=$(grep "^  solve_time" /tmp/b1_smoke.txt | awk -F': ' '{print $2}' | tr -d ' ')
+    out_size=$(wc -c < "${OUT}" 2>/dev/null || echo 0)
+
+    b1_ok=1
+    [[ "${B1_RC}" -eq 0 ]]         || { fail "B1 smoke: exit code ${B1_RC} (non-zero)"; b1_ok=0; }
+    [[ "${routed:-0}" -ge 1 ]]     || { fail "B1 smoke: routed_nets=${routed:-0} (need >= 1)"; b1_ok=0; }
+    [[ "${disconn:-1}" -eq 0 ]]    || { fail "B1 smoke: disconnected=${disconn} (need 0)"; b1_ok=0; }
+    [[ "${out_size:-0}" -gt 0 ]]   || { fail "B1 smoke: output file empty or missing"; b1_ok=0; }
+
+    if [[ "${b1_ok}" -eq 1 ]]; then
+        ok "B1 smoke: routed=${routed} disconnected=${disconn} solve_time=${solve_t} out=${out_size}B"
     else
+        echo "--- B1 smoke log ---"
         cat /tmp/b1_smoke.txt
-        fail "B1 smoke: router_lp did not complete within 120s or failed"
+        echo "--------------------"
     fi
 fi
 
