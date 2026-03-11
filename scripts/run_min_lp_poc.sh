@@ -15,7 +15,7 @@ CUPDLPX_BUILD="${CUPDLPX_BUILD_DIR:-/tmp/cupdlpx_build}"
 PSLP_INC="$CUPDLPX_BUILD/_deps/pslp-src/include/PSLP"
 SRC="$REPO_ROOT/router_lp/examples/min_route_lp_with_cupdlpx.cpp"
 BIN="$REPO_ROOT/router_lp/examples/min_route_lp_poc"
-GPU_ID="${GPU_ID:-1}"
+GPU_ID="${GPU_ID:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

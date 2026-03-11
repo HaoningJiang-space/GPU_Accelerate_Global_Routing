@@ -14,13 +14,15 @@
 //     ...
 //     cap[Y-1][0] ...
 //
-// .net format:
+// .net format (InstantGR):
 //   net_name
 //   (
-//   [access_flat_1 access_flat_2 ...]  [access_flat_1 ...]  ...  \n
+//   [(l, x, y), (l, x, y), ...]   <- pin group: one or more (layer,x,y) access points
+//   [(l, x, y)]
+//   ...
 //   )
 //   ...
-//   where access_flat = l*X*Y + x*Y + y
+//   The reader picks the first access point in each pin group as the representative pin.
 
 #include "routing_types.hpp"
 #include <string>

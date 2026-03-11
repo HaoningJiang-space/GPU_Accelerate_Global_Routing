@@ -187,7 +187,7 @@ bool read_net_file(const std::string& path, const GridInfo& grid,
 // ── 2-pin decomposition ──────────────────────────────────────────────────────
 // Star decomposition: pick pin[0] as centre, connect to all others.
 
-std::vector<TwoNet> decompose_to_2pin(const MultiPinNet& mnet, int /*net_global_idx*/) {
+std::vector<TwoNet> decompose_to_2pin(const MultiPinNet& mnet) {
     std::vector<TwoNet> result;
     if (mnet.pins.size() < 2) return result;
 
