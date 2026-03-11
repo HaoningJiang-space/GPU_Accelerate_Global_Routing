@@ -20,13 +20,21 @@
 namespace rlp {
 
 struct LagrangianConfig {
-    int    max_iters   = 50;     // number of subgradient iterations
-    double step_size   = 0.5;    // initial α_0
-    double step_decay  = 0.5;    // α_t = α_0 / t^decay  (0.5 = sqrt schedule)
-    int    margin      = 5;      // expand each net's bbox by this many gcells per side
-    bool   add_via     = true;   // include via edges in Dijkstra
-    double via_cap     = 1.0;    // capacity per via edge
-    int    log_every   = 10;     // print violation summary every N iters (0=quiet)
+    int    max_iters        = 50;    // number of subgradient iterations
+    double step_size        = 0.2;   // initial α_0  (was 0.5; lower = less oscillation)
+    double step_decay       = 0.7;   // α_t = α_0 / t^decay  (higher = faster decay)
+    int    margin           = 5;     // expand each net's bbox by this many gcells per side
+    bool   add_via          = true;  // include via edges in Dijkstra / BF
+    double via_cap          = 1.0;   // capacity per via edge
+    int    log_every        = 10;    // print violation summary every N iters (0=quiet)
+    // Forward dispersion: add beta*(prev_use/cap) to BF edge cost to discourage
+    // routing through already-congested edges in the NEXT shortest-path solve.
+    // 0.0 disables (backward-compatible); 0.5 is a good starting value.
+    double beta_dispersion  = 0.5;
+    // EMA momentum for smoothing prev_use across iterations.
+    // Prevents 2-period oscillation caused by dispersion alternating congestion states.
+    // 0.0 = plain copy (prev_use = current_use); 0.7 = recommended.
+    double ema_momentum     = 0.3;
 };
 
 struct LagrangianStats {

@@ -40,6 +40,15 @@ static constexpr int INF_DIST   = 0x3fffffff;
         }                                                                 \
     } while (0)
 
+// Deterministic per-(net,edge) perturbation in {0..10}.
+// Added to integer edge cost so that ties in float -> int rounding are broken
+// differently for each net, preventing inter-net path clustering.
+// Must be used identically in bf_iters_kernel, trace_and_use_kernel, and
+// lag_gpu_extract_routes to keep dist[v]+w == d_cur checks consistent.
+__host__ __device__ inline int edge_eps(int ni, int ei) {
+    return (ni * 7 + ei) % 11;
+}
+
 // Per-net bbox descriptor uploaded to GPU once.
 struct NetGPU {
     int src_li, snk_li;   // local node indices
@@ -59,6 +68,14 @@ __global__ void reset_int_kernel(int* arr, int n, int val) {
 __global__ void reset_float_kernel(float* arr, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) arr[i] = 0.0f;
+}
+
+// EMA update: ema[i] = momentum * ema[i] + (1 - momentum) * cur[i].
+// Used to smooth the prev_use dispersion signal and prevent 2-period oscillation.
+__global__ void ema_update_kernel(float* __restrict__ ema, const float* __restrict__ cur,
+                                  float momentum, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) ema[i] = momentum * ema[i] + (1.0f - momentum) * cur[i];
 }
 
 // Set dist[src_li] = 0 for every net.
@@ -145,26 +162,45 @@ __global__ void bf_pass_kernel(
 }
 
 // Inner-loop BF kernel: runs all max_bf_iters passes in a single kernel launch.
-// One block per net; threads cooperate on that net's bbox dist[] in global memory.
-// __syncthreads() replaces the per-pass cudaDeviceSynchronize():
-//   - each net's dist[] is private to its block, so no inter-block dependency exists.
-//   - __syncthreads() ensures all atomicMin writes of pass k are visible before pass k+1.
+// Edge cost = base + lambda + eps(ni,ei) + beta*(prev_use/cap).
+//   eps: deterministic per-(net,edge) perturbation to break inter-net path ties.
+//   beta term: forward dispersion — penalises edges used heavily in previous
+//              iteration, steering different nets onto less-congested paths.
+// __syncthreads() acts as the per-pass barrier (dist[] is private per block).
 __global__ void bf_iters_kernel(
     const NetGPU* __restrict__ nets,
     int*          __restrict__ d_dist,
     const float*  __restrict__ d_lam_h,
     const float*  __restrict__ d_lam_v,
     const float*  __restrict__ d_lam_via,
+    const float*  __restrict__ d_use_prev_h,
+    const float*  __restrict__ d_use_prev_v,
+    const float*  __restrict__ d_use_prev_via,
+    const float*  __restrict__ d_cap_h,
+    const float*  __restrict__ d_cap_v,
+    float via_cap,
     const int*    __restrict__ d_layer_dir,
     const float*  __restrict__ d_layer_sc,
     float unit_wire_cost, float unit_via_cost,
-    int gX, int gY, bool add_via, int max_bf_iters)
+    int gX, int gY, bool add_via, int max_bf_iters, float beta)
 {
     int ni = blockIdx.x;
     const NetGPU& net = nets[ni];
     int* dist = d_dist + net.dist_offset;
     const int bx = net.bx, by = net.by, L = net.L;
     const int n_local = net.n_local;
+
+    // Macro: compute augmented integer edge cost (lambda + dispersion + eps).
+    // cap_val > 0 is guaranteed by grid construction; clamp to avoid div-by-zero.
+#define EDGE_W_H(ei_)  ((int)((base_wire + fmaxf(0.0f, d_lam_h[ei_]) \
+    + beta * fminf(d_use_prev_h[ei_] / fmaxf(d_cap_h[ei_], 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
+#define EDGE_W_V(ei_)  ((int)((base_wire + fmaxf(0.0f, d_lam_v[ei_]) \
+    + beta * fminf(d_use_prev_v[ei_] / fmaxf(d_cap_v[ei_], 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
+#define EDGE_W_VIA(ei_) ((int)((base_via + fmaxf(0.0f, d_lam_via[ei_]) \
+    + beta * fminf(d_use_prev_via[ei_] / fmaxf(via_cap, 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
 
     for (int pass = 0; pass < max_bf_iters; ++pass) {
         for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x) {
@@ -185,54 +221,57 @@ __global__ void bf_iters_kernel(
             if (dir == 0) {
                 if (lx + 1 < bx) {
                     int ei = ll * gX * gY + gx * gY + gy;
-                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-                    atomicMin(dist + (lx+1)*by*L + ly*L + ll, d_u + w);
+                    atomicMin(dist + (lx+1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
                 }
                 if (lx > 0) {
                     int ei = ll * gX * gY + (gx-1) * gY + gy;
-                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-                    atomicMin(dist + (lx-1)*by*L + ly*L + ll, d_u + w);
+                    atomicMin(dist + (lx-1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
                 }
             }
             if (dir == 1) {
                 if (ly + 1 < by) {
                     int ei = ll * gX * gY + gx * gY + gy;
-                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-                    atomicMin(dist + lx*by*L + (ly+1)*L + ll, d_u + w);
+                    atomicMin(dist + lx*by*L + (ly+1)*L + ll, d_u + EDGE_W_V(ei));
                 }
                 if (ly > 0) {
                     int ei = ll * gX * gY + gx * gY + (gy-1);
-                    int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-                    atomicMin(dist + lx*by*L + (ly-1)*L + ll, d_u + w);
+                    atomicMin(dist + lx*by*L + (ly-1)*L + ll, d_u + EDGE_W_V(ei));
                 }
             }
             if (add_via && ll + 1 < L) {
                 int ei = ll * gX * gY + gx * gY + gy;
-                int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-                atomicMin(dist + lx*by*L + ly*L + (ll+1), d_u + w);
+                atomicMin(dist + lx*by*L + ly*L + (ll+1), d_u + EDGE_W_VIA(ei));
             }
             if (add_via && ll > 0) {
                 int ei = (ll-1) * gX * gY + gx * gY + gy;
-                int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-                atomicMin(dist + lx*by*L + ly*L + (ll-1), d_u + w);
+                atomicMin(dist + lx*by*L + ly*L + (ll-1), d_u + EDGE_W_VIA(ei));
             }
         }
-        // Barrier: all threads in this block must finish atomicMin writes before
-        // the next pass reads dist[].  Safe because dist[] is private to this block.
         __syncthreads();
     }
+#undef EDGE_W_H
+#undef EDGE_W_V
+#undef EDGE_W_VIA
 }
 
 // Trace path snk->src per net (one thread per net), accumulate edge usage.
 // Tie-breaking: among all equal-cost predecessors, select the one with the
 // smallest lambda (less congested), then smallest edge_id (deterministic).
 // Lambda is read-only during tracing — no race condition.
+// The edge-weight formula MUST match bf_iters_kernel exactly (same eps +
+// dispersion term) so that dist[v]+w==d_cur holds along the optimal path.
 __global__ void trace_and_use_kernel(
     const NetGPU* __restrict__ nets,
     const int*    __restrict__ d_dist,
     const float*  __restrict__ d_lam_h,
     const float*  __restrict__ d_lam_v,
     const float*  __restrict__ d_lam_via,
+    const float*  __restrict__ d_use_prev_h,
+    const float*  __restrict__ d_use_prev_v,
+    const float*  __restrict__ d_use_prev_via,
+    const float*  __restrict__ d_cap_h,
+    const float*  __restrict__ d_cap_v,
+    float via_cap,
     const int*    __restrict__ d_layer_dir,
     const float*  __restrict__ d_layer_sc,
     float unit_wire_cost, float unit_via_cost,
@@ -240,7 +279,7 @@ __global__ void trace_and_use_kernel(
     float* __restrict__ d_use_h,
     float* __restrict__ d_use_v,
     float* __restrict__ d_use_via,
-    int n_nets, bool add_via)
+    int n_nets, bool add_via, float beta)
 {
     int ni = blockIdx.x * blockDim.x + threadIdx.x;
     if (ni >= n_nets) return;
@@ -274,7 +313,9 @@ __global__ void trace_and_use_kernel(
 
 #define CHECK_PRED_H(v_, ei_) {                                             \
     int v__=(v_), ei__=(ei_);                                               \
-    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_h[ei__]))*COST_SCALE);       \
+    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_h[ei__])                     \
+        + beta * fminf(d_use_prev_h[ei__] / fmaxf(d_cap_h[ei__], 1e-6f), 8.0f)) \
+        * COST_SCALE) + edge_eps(ni, ei__);                                 \
     if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
         float lam__=d_lam_h[ei__];                                          \
         if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
@@ -282,7 +323,9 @@ __global__ void trace_and_use_kernel(
 
 #define CHECK_PRED_V(v_, ei_) {                                             \
     int v__=(v_), ei__=(ei_);                                               \
-    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_v[ei__]))*COST_SCALE);       \
+    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_v[ei__])                     \
+        + beta * fminf(d_use_prev_v[ei__] / fmaxf(d_cap_v[ei__], 1e-6f), 8.0f)) \
+        * COST_SCALE) + edge_eps(ni, ei__);                                 \
     if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
         float lam__=d_lam_v[ei__];                                          \
         if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
@@ -290,7 +333,9 @@ __global__ void trace_and_use_kernel(
 
 #define CHECK_PRED_VIA(v_, ei_) {                                           \
     int v__=(v_), ei__=(ei_);                                               \
-    int w__=(int)((base_via+fmaxf(0.0f,d_lam_via[ei__]))*COST_SCALE);      \
+    int w__=(int)((base_via+fmaxf(0.0f,d_lam_via[ei__])                    \
+        + beta * fminf(d_use_prev_via[ei__] / fmaxf(via_cap, 1e-6f), 8.0f)) \
+        * COST_SCALE) + edge_eps(ni, ei__);                                 \
     if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
         float lam__=d_lam_via[ei__];                                        \
         if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
@@ -344,21 +389,28 @@ struct LagGPUCtx {
     int n_nets, total_dist_nodes, max_bf_iters;
     std::vector<NetGPU> h_nets;
 
-    NetGPU* d_nets      = nullptr;
-    int*    d_dist      = nullptr;
-    float*  d_lam_h     = nullptr;
-    float*  d_lam_v     = nullptr;
-    float*  d_lam_via   = nullptr;
-    float*  d_use_h     = nullptr;
-    float*  d_use_v     = nullptr;
-    float*  d_use_via   = nullptr;
-    float*  d_cap_h     = nullptr;
-    float*  d_cap_v     = nullptr;
-    int*    d_layer_dir = nullptr;
-    float*  d_layer_sc  = nullptr;
+    NetGPU* d_nets          = nullptr;
+    int*    d_dist          = nullptr;
+    float*  d_lam_h         = nullptr;
+    float*  d_lam_v         = nullptr;
+    float*  d_lam_via       = nullptr;
+    float*  d_use_h         = nullptr;
+    float*  d_use_v         = nullptr;
+    float*  d_use_via       = nullptr;
+    // Previous-iteration usage: read-only during BF to compute dispersion term.
+    // Swapped with d_use_* after each trace step (device-device copy).
+    float*  d_use_prev_h    = nullptr;
+    float*  d_use_prev_v    = nullptr;
+    float*  d_use_prev_via  = nullptr;
+    float*  d_cap_h         = nullptr;
+    float*  d_cap_v         = nullptr;
+    int*    d_layer_dir     = nullptr;
+    float*  d_layer_sc      = nullptr;
 
     float  unit_wire_cost, unit_via_cost;
     double step_size, step_decay, via_cap;
+    float  beta;          // forward-dispersion coefficient (from cfg.beta_dispersion)
+    float  ema_momentum;  // EMA smoothing for prev_use (0=no smooth, 0.7=recommended)
     bool   add_via;
 
     double t_bf = 0, t_trace = 0, t_lam = 0;
@@ -381,6 +433,8 @@ static LagGPUCtx* lag_gpu_init(
     ctx->step_decay = cfg.step_decay;
     ctx->via_cap    = cfg.via_cap;
     ctx->add_via    = cfg.add_via;
+    ctx->beta           = (float)cfg.beta_dispersion;
+    ctx->ema_momentum   = (float)cfg.ema_momentum;
 
     const int X = grid.X, Y = grid.Y, L = grid.L;
 
@@ -423,9 +477,12 @@ static LagGPUCtx* lag_gpu_init(
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_h,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_v,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_via,   ctx->LXY * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ctx->d_use_h,     ctx->LXY * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ctx->d_use_v,     ctx->LXY * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&ctx->d_use_via,   ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_h,         ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_v,         ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_via,       ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_prev_h,    ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_prev_v,    ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&ctx->d_use_prev_via,  ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_cap_h,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_cap_v,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_layer_dir, L * sizeof(int)));
@@ -457,9 +514,13 @@ static LagGPUCtx* lag_gpu_init(
     CUDA_CHECK(cudaMemcpy(ctx->d_cap_h, h_cap_h.data(), ctx->LXY*sizeof(float), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(ctx->d_cap_v, h_cap_v.data(), ctx->LXY*sizeof(float), cudaMemcpyHostToDevice));
 
-    CUDA_CHECK(cudaMemset(ctx->d_lam_h,   0, ctx->LXY * sizeof(float)));
-    CUDA_CHECK(cudaMemset(ctx->d_lam_v,   0, ctx->LXY * sizeof(float)));
-    CUDA_CHECK(cudaMemset(ctx->d_lam_via, 0, ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMemset(ctx->d_lam_h,       0, ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMemset(ctx->d_lam_v,       0, ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMemset(ctx->d_lam_via,     0, ctx->LXY * sizeof(float)));
+    // prev_use starts at zero (no history before iteration 1)
+    CUDA_CHECK(cudaMemset(ctx->d_use_prev_h,   0, ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMemset(ctx->d_use_prev_v,   0, ctx->LXY * sizeof(float)));
+    CUDA_CHECK(cudaMemset(ctx->d_use_prev_via, 0, ctx->LXY * sizeof(float)));
 
     return ctx;
 }
@@ -488,9 +549,11 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         bf_iters_kernel<<<n_nets, 256>>>(
             ctx->d_nets, ctx->d_dist,
             ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+            ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+            ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
             ctx->d_layer_dir, ctx->d_layer_sc,
             ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
-            ctx->add_via, ctx->max_bf_iters);
+            ctx->add_via, ctx->max_bf_iters, ctx->beta);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t1 = std::chrono::steady_clock::now();
         ctx->t_bf += std::chrono::duration<double>(t1 - t0).count();
@@ -502,9 +565,12 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         trace_and_use_kernel<<<grid_trace, 128>>>(
             ctx->d_nets, ctx->d_dist,
             ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+            ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+            ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
             ctx->d_layer_dir, ctx->d_layer_sc,
             ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
-            ctx->d_use_h, ctx->d_use_v, ctx->d_use_via, n_nets, ctx->add_via);
+            ctx->d_use_h, ctx->d_use_v, ctx->d_use_via,
+            n_nets, ctx->add_via, ctx->beta);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t2 = std::chrono::steady_clock::now();
         ctx->t_trace += std::chrono::duration<double>(t2 - t1).count();
@@ -512,6 +578,14 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         // Step 4: Update lambda — skipped on the last iteration so that the
         // final d_dist and d_lam_* remain consistent for path extraction.
         if (iter < max_iters) {
+            // EMA-smooth prev_use: damps 2-period oscillation caused by dispersion
+            // alternating between two congestion states.  With ema_momentum=0 this
+            // degenerates to a plain copy (prev_use = current_use).
+            if (ctx->beta != 0.0f) {
+                ema_update_kernel<<<grid_upd, 256>>>(ctx->d_use_prev_h,   ctx->d_use_h,   ctx->ema_momentum, LXY);
+                ema_update_kernel<<<grid_upd, 256>>>(ctx->d_use_prev_v,   ctx->d_use_v,   ctx->ema_momentum, LXY);
+                ema_update_kernel<<<grid_upd, 256>>>(ctx->d_use_prev_via, ctx->d_use_via, ctx->ema_momentum, LXY);
+            }
             update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_h,   ctx->d_use_h,   ctx->d_cap_h, alpha, LXY);
             update_lam_kernel<<<grid_upd, 256>>>(ctx->d_lam_v,   ctx->d_use_v,   ctx->d_cap_v, alpha, LXY);
             if (ctx->add_via) {
@@ -570,6 +644,25 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
                       << "  max_finite_dist=" << max_finite_dist
                       << "  INF_nodes=" << n_near_inf << "\n";
         }
+    }
+
+    // Final clean BF: recompute dist with the converged lambda but beta=0.
+    // This ensures lag_gpu_extract_routes (CPU) can match predecessors via
+    //   dist[v] + (base+lambda+eps)*COST_SCALE == d_cur
+    // without needing the dispersion term (which is not part of the actual route cost).
+    if (ctx->beta != 0.0f) {
+        reset_int_kernel<<<(ctx->total_dist_nodes+255)/256, 256>>>(
+            ctx->d_dist, ctx->total_dist_nodes, INF_DIST);
+        init_src_kernel<<<n_nets, 1>>>(ctx->d_nets, ctx->d_dist);
+        bf_iters_kernel<<<n_nets, 256>>>(
+            ctx->d_nets, ctx->d_dist,
+            ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+            ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+            ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
+            ctx->d_layer_dir, ctx->d_layer_sc,
+            ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+            ctx->add_via, ctx->max_bf_iters, /*beta=*/0.0f);
+        CUDA_CHECK(cudaDeviceSynchronize());
     }
 }
 
@@ -635,7 +728,9 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
                                 int sx1,int sy1,int sz1,int sx2,int sy2,int sz2,
                                 float cost_base, const std::vector<float>& lam_arr) {
                 if (v < 0 || v >= ng.n_local) return;
-                int w = (int)((cost_base + fmaxf(0.0f, lam_arr[ei])) * COST_SCALE);
+                // Must mirror bf_iters_kernel exactly: same COST_SCALE and edge_eps.
+                int w = (int)((cost_base + fmaxf(0.0f, lam_arr[ei])) * COST_SCALE)
+                        + edge_eps(ni, ei);
                 if (dist[v] == INF_DIST || dist[v] + w != d_cur) return;
                 if (lam < best.lam || (lam == best.lam && ei < best.ei))
                     best = {v, ei, type, sx1,sy1,sz1,sx2,sy2,sz2, lam};
@@ -678,6 +773,7 @@ static void lag_gpu_free(LagGPUCtx* ctx) {
     cudaFree(ctx->d_nets);     cudaFree(ctx->d_dist);
     cudaFree(ctx->d_lam_h);   cudaFree(ctx->d_lam_v);   cudaFree(ctx->d_lam_via);
     cudaFree(ctx->d_use_h);   cudaFree(ctx->d_use_v);   cudaFree(ctx->d_use_via);
+    cudaFree(ctx->d_use_prev_h); cudaFree(ctx->d_use_prev_v); cudaFree(ctx->d_use_prev_via);
     cudaFree(ctx->d_cap_h);   cudaFree(ctx->d_cap_v);
     cudaFree(ctx->d_layer_dir); cudaFree(ctx->d_layer_sc);
     delete ctx;

@@ -36,7 +36,7 @@ static void usage(const char* prog) {
         << " -cap <cap> -net <net> -out <out>"
            " [--mode pure_lp|windowed|adaptive|lagrangian] [--max-nets N] [--max-hpwl N]"
            " [--window-x N] [--window-y N] [--margin N] [--batch-grid N]"
-           " [--lag-iters N] [--lag-step F] [--lag-decay F]"
+           " [--lag-iters N] [--lag-step F] [--lag-decay F] [--lag-beta F] [--lag-ema F]"
            " [--gpu N] [--config yaml] [--threshold T] [--no-via]"
            " [--inexact-tol T]\n";
 }
@@ -54,8 +54,10 @@ int main(int argc, char* argv[]) {
     int    margin         = 5;
     int    batch_grid     = 50;
     int    lag_iters      = 50;
-    double lag_step       = 0.5;
-    double lag_decay      = 0.5;
+    double lag_step       = 0.2;   // default matches LagrangianConfig::step_size
+    double lag_decay      = 0.7;   // default matches LagrangianConfig::step_decay
+    double lag_beta       = 0.5;   // forward dispersion beta (0=disabled)
+    double lag_ema        = 0.3;   // EMA momentum for prev_use smoothing
     int    gpu_id         = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
     double threshold      = 0.1;
     double inexact_tol    = 1e-3;
@@ -81,6 +83,8 @@ int main(int argc, char* argv[]) {
         else if (a == "--lag-iters")    lag_iters   = std::stoi(next());
         else if (a == "--lag-step")     lag_step    = std::stod(next());
         else if (a == "--lag-decay")    lag_decay   = std::stod(next());
+        else if (a == "--lag-beta")     lag_beta    = std::stod(next());
+        else if (a == "--lag-ema")      lag_ema     = std::stod(next());
         else if (a == "--gpu")          gpu_id      = std::stoi(next());
         else if (a == "--threshold")    threshold   = std::stod(next());
         else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
@@ -267,12 +271,14 @@ int main(int argc, char* argv[]) {
     // ── Lagrangian mode ───────────────────────────────────────────────────────
     if (mode == "lagrangian") {
         rlp::LagrangianConfig lcfg;
-        lcfg.max_iters  = lag_iters;
-        lcfg.step_size  = lag_step;
-        lcfg.step_decay = lag_decay;
-        lcfg.margin     = margin;
-        lcfg.add_via    = add_via;
-        lcfg.log_every  = 10;
+        lcfg.max_iters        = lag_iters;
+        lcfg.step_size        = lag_step;
+        lcfg.step_decay       = lag_decay;
+        lcfg.margin           = margin;
+        lcfg.add_via          = add_via;
+        lcfg.log_every        = 10;
+        lcfg.beta_dispersion  = lag_beta;
+        lcfg.ema_momentum     = lag_ema;
 
         rlp::LagrangianStats lstats;
         auto routes = lag_gpu
