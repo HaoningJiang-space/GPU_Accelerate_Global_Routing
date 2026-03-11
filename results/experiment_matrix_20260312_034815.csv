@@ -1,0 +1,3 @@
+benchmark,mode,routed_nets,disconnected,max_viol,avg_viol,total_time_s,wl_cost,via_cost,overflow_cost,open_nets,incompleted_nets
+mempool_tile_rank,lag_cpu,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+mempool_tile_rank,lag_gpu,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A
