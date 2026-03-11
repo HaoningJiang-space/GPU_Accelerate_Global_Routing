@@ -51,11 +51,12 @@ __host__ __device__ inline int edge_eps(int ni, int ei) {
 
 // Small-net threshold: nets with n_local <= SMALL_THRESH have their dist[]
 // held in shared memory during BF, saving global-memory atomicMin latency.
-// 8192 ints = 32 KB shared mem per block, within the 48 KB hardware default.
-// On sm_86 (RTX 3090) 48 KB / 32 KB = 1.5 → 1 concurrent block/SM,
-// which is still a win vs global atomicMin for nets that fit.
-// Covers margin=5 nets up to ~bx*by*L ≤ 8192 (e.g. 28×29×10 or 90×90×1).
-static constexpr int SMALL_THRESH = 8192;
+// RTX 3090 (sm_86): 48 KB dynamic shared mem per block (opt-in via
+// cudaFuncSetAttribute).  12288 ints × 4 B = 48 KB.
+// Covers margin=5 nets up to bx*by*L ≤ 12288 (e.g. 35×35×10 or ~110×1×10).
+// cudaFuncSetAttribute must be called once before launch (see lag_gpu_init).
+static constexpr int SMALL_THRESH     = 12288;
+static constexpr int SMALL_SHMEM_BYTES = SMALL_THRESH * (int)sizeof(int); // 49152 B
 
 // Per-net bbox descriptor uploaded to GPU once.
 struct NetGPU {
@@ -189,7 +190,8 @@ __global__ void bf_iters_kernel(
 // latency for nets with small bboxes (n_local <= SMALL_THRESH).
 //
 // Launch: bf_iters_small_kernel<<<n_small, 256, max_small_n_local*sizeof(int)>>>
-//   max_small_n_local must be <= SMALL_THRESH (checked at init).
+//   max_small_n_local must be <= SMALL_THRESH; cudaFuncSetAttribute must be
+//   called to raise the dynamic shared memory limit to SMALL_SHMEM_BYTES.
 // Each block handles one net from d_nets_small (the small-net sub-array).
 // Edge costs and global arrays (lambda, cap, use_prev) are the same as the
 // large kernel; only dist[] differs (shared vs global).
@@ -529,6 +531,13 @@ static LagGPUCtx* lag_gpu_init(
 
     CUDA_CHECK(cudaMalloc(&ctx->d_nets,      ctx->n_nets * sizeof(NetGPU)));
     if (ctx->n_small > 0) {
+        // Allow bf_iters_small_kernel to use up to SMALL_SHMEM_BYTES of dynamic
+        // shared memory (48 KB on sm_86; default limit is 48 KB but must be
+        // declared explicitly when exceeding 32 KB to avoid silent truncation).
+        CUDA_CHECK(cudaFuncSetAttribute(
+            bf_iters_small_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            SMALL_SHMEM_BYTES));
         CUDA_CHECK(cudaMalloc(&ctx->d_nets_small, ctx->n_small * sizeof(NetGPU)));
         CUDA_CHECK(cudaMemcpy(ctx->d_nets_small, h_nets_small.data(),
                               ctx->n_small * sizeof(NetGPU), cudaMemcpyHostToDevice));
