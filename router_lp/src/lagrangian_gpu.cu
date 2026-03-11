@@ -49,6 +49,11 @@ __host__ __device__ inline int edge_eps(int ni, int ei) {
     return (ni * 7 + ei) % 11;
 }
 
+// Small-net threshold: nets with n_local <= SMALL_THRESH have their dist[]
+// held in shared memory during BF, saving global-memory atomicMin latency.
+// 2048 ints = 8 KB shared mem → 6 concurrent blocks per SM (48 KB default).
+static constexpr int SMALL_THRESH = 2048;
+
 // Per-net bbox descriptor uploaded to GPU once.
 struct NetGPU {
     int src_li, snk_li;   // local node indices
@@ -56,6 +61,7 @@ struct NetGPU {
     int bx, by, L;        // bbox dimensions (L = full layer count)
     int n_local;          // = bx * by * L
     int dist_offset;      // start in d_dist[]
+    int max_bf_iters;     // = bx + by + L (BF diameter for this net)
 };
 
 // ---- Kernels ----------------------------------------------------------------
@@ -84,89 +90,10 @@ __global__ void init_src_kernel(const NetGPU* __restrict__ nets, int* __restrict
     d_dist[nets[ni].dist_offset + nets[ni].src_li] = 0;
 }
 
-// One BF relaxation pass: one block per net, threads iterate over local nodes.
-// Repeated max_bf_iters times to guarantee convergence (diameter of bbox graph).
-__global__ void bf_pass_kernel(
-    const NetGPU* __restrict__ nets,
-    int*          __restrict__ d_dist,
-    const float*  __restrict__ d_lam_h,
-    const float*  __restrict__ d_lam_v,
-    const float*  __restrict__ d_lam_via,
-    const int*    __restrict__ d_layer_dir,
-    const float*  __restrict__ d_layer_sc,
-    float unit_wire_cost, float unit_via_cost,
-    int gX, int gY, bool add_via)
-{
-    int ni = blockIdx.x;
-    const NetGPU& net = nets[ni];
-    int* dist = d_dist + net.dist_offset;
-    const int bx = net.bx, by = net.by, L = net.L;
-    const int n_local = net.n_local;
-
-    for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x) {
-        int d_u = dist[li];
-        if (d_u >= INF_DIST) continue;
-
-        int ll  = li % L;
-        int tmp = li / L;
-        int ly  = tmp % by;
-        int lx  = tmp / by;
-        int gx  = lx + net.x0;
-        int gy  = ly + net.y0;
-
-        float base_wire = unit_wire_cost * d_layer_sc[ll];
-        float base_via  = unit_via_cost;
-        int   dir       = d_layer_dir[ll];
-
-        if (dir == 0) {
-            // H forward: (gx,gy,ll) -> (gx+1,gy,ll), edge ei=(ll,gx,gy)
-            if (lx + 1 < bx) {
-                int ei = ll * gX * gY + gx * gY + gy;
-                int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-                atomicMin(dist + (lx+1)*by*L + ly*L + ll, d_u + w);
-            }
-            // H backward: (gx,gy,ll) -> (gx-1,gy,ll), edge ei=(ll,gx-1,gy)
-            if (lx > 0) {
-                int ei = ll * gX * gY + (gx-1) * gY + gy;
-                int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-                atomicMin(dist + (lx-1)*by*L + ly*L + ll, d_u + w);
-            }
-        }
-        if (dir == 1) {
-            // V forward: (gx,gy,ll) -> (gx,gy+1,ll), edge ei=(ll,gx,gy)
-            if (ly + 1 < by) {
-                int ei = ll * gX * gY + gx * gY + gy;
-                int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-                atomicMin(dist + lx*by*L + (ly+1)*L + ll, d_u + w);
-            }
-            // V backward: (gx,gy,ll) -> (gx,gy-1,ll), edge ei=(ll,gx,gy-1)
-            if (ly > 0) {
-                int ei = ll * gX * gY + gx * gY + (gy-1);
-                int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-                atomicMin(dist + lx*by*L + (ly-1)*L + ll, d_u + w);
-            }
-        }
-        // Via up: (gx,gy,ll) -> (gx,gy,ll+1), via edge ei=(ll,gx,gy)
-        if (add_via && ll + 1 < L) {
-            int ei = ll * gX * gY + gx * gY + gy;
-            int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-            atomicMin(dist + lx*by*L + ly*L + (ll+1), d_u + w);
-        }
-        // Via down: (gx,gy,ll) -> (gx,gy,ll-1), via edge ei=(ll-1,gx,gy)
-        if (add_via && ll > 0) {
-            int ei = (ll-1) * gX * gY + gx * gY + gy;
-            int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-            atomicMin(dist + lx*by*L + ly*L + (ll-1), d_u + w);
-        }
-    }
-}
-
-// Inner-loop BF kernel: runs all max_bf_iters passes in a single kernel launch.
+// Inner-loop BF kernel: runs all BF passes in a single kernel launch (large nets).
+// dist[] lives in global memory; one block per net.
 // Edge cost = base + lambda + eps(ni,ei) + beta*(prev_use/cap).
-//   eps: deterministic per-(net,edge) perturbation to break inter-net path ties.
-//   beta term: forward dispersion — penalises edges used heavily in previous
-//              iteration, steering different nets onto less-congested paths.
-// __syncthreads() acts as the per-pass barrier (dist[] is private per block).
+// Each block runs net.max_bf_iters passes (exact BF diameter for that net).
 __global__ void bf_iters_kernel(
     const NetGPU* __restrict__ nets,
     int*          __restrict__ d_dist,
@@ -182,7 +109,7 @@ __global__ void bf_iters_kernel(
     const int*    __restrict__ d_layer_dir,
     const float*  __restrict__ d_layer_sc,
     float unit_wire_cost, float unit_via_cost,
-    int gX, int gY, bool add_via, int max_bf_iters, float beta)
+    int gX, int gY, bool add_via, float beta)
 {
     int ni = blockIdx.x;
     const NetGPU& net = nets[ni];
@@ -202,7 +129,7 @@ __global__ void bf_iters_kernel(
     + beta * fminf(d_use_prev_via[ei_] / fmaxf(via_cap, 1e-6f), 8.0f)) \
     * COST_SCALE) + edge_eps(ni, (ei_)))
 
-    for (int pass = 0; pass < max_bf_iters; ++pass) {
+    for (int pass = 0; pass < net.max_bf_iters; ++pass) {
         for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x) {
             int d_u = dist[li];
             if (d_u >= INF_DIST) continue;
@@ -254,7 +181,112 @@ __global__ void bf_iters_kernel(
 #undef EDGE_W_VIA
 }
 
-// Trace path snk->src per net (one thread per net), accumulate edge usage.
+// Small-net BF kernel: dist[] held in shared memory for the duration of all passes.
+// Shared atomicMin is ~100x faster than global atomicMin, saving significant
+// latency for nets with small bboxes (n_local <= SMALL_THRESH).
+//
+// Launch: bf_iters_small_kernel<<<n_small, 256, max_small_n_local*sizeof(int)>>>
+//   max_small_n_local must be <= SMALL_THRESH (checked at init).
+// Each block handles one net from d_nets_small (the small-net sub-array).
+// Edge costs and global arrays (lambda, cap, use_prev) are the same as the
+// large kernel; only dist[] differs (shared vs global).
+__global__ void bf_iters_small_kernel(
+    const NetGPU* __restrict__ nets,
+    int*          __restrict__ d_dist,       // global (for load/store only)
+    const float*  __restrict__ d_lam_h,
+    const float*  __restrict__ d_lam_v,
+    const float*  __restrict__ d_lam_via,
+    const float*  __restrict__ d_use_prev_h,
+    const float*  __restrict__ d_use_prev_v,
+    const float*  __restrict__ d_use_prev_via,
+    const float*  __restrict__ d_cap_h,
+    const float*  __restrict__ d_cap_v,
+    float via_cap,
+    const int*    __restrict__ d_layer_dir,
+    const float*  __restrict__ d_layer_sc,
+    float unit_wire_cost, float unit_via_cost,
+    int gX, int gY, bool add_via, float beta)
+{
+    extern __shared__ int smem[];     // dist[] for this net, size = n_local ints
+
+    int ni = blockIdx.x;
+    const NetGPU& net    = nets[ni];
+    int*          gdist  = d_dist + net.dist_offset;  // global pointer
+    const int bx = net.bx, by = net.by, L = net.L;
+    const int n_local = net.n_local;
+
+    // Load global dist → shared memory
+    for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x)
+        smem[li] = gdist[li];
+    __syncthreads();
+
+#define EDGE_W_H(ei_)  ((int)((base_wire + fmaxf(0.0f, d_lam_h[ei_]) \
+    + beta * fminf(d_use_prev_h[ei_] / fmaxf(d_cap_h[ei_], 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
+#define EDGE_W_V(ei_)  ((int)((base_wire + fmaxf(0.0f, d_lam_v[ei_]) \
+    + beta * fminf(d_use_prev_v[ei_] / fmaxf(d_cap_v[ei_], 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
+#define EDGE_W_VIA(ei_) ((int)((base_via + fmaxf(0.0f, d_lam_via[ei_]) \
+    + beta * fminf(d_use_prev_via[ei_] / fmaxf(via_cap, 1e-6f), 8.0f)) \
+    * COST_SCALE) + edge_eps(ni, (ei_)))
+
+    for (int pass = 0; pass < net.max_bf_iters; ++pass) {
+        for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x) {
+            int d_u = smem[li];
+            if (d_u >= INF_DIST) continue;
+
+            int ll  = li % L;
+            int tmp = li / L;
+            int ly  = tmp % by;
+            int lx  = tmp / by;
+            int gx  = lx + net.x0;
+            int gy  = ly + net.y0;
+
+            float base_wire = unit_wire_cost * d_layer_sc[ll];
+            float base_via  = unit_via_cost;
+            int   dir       = d_layer_dir[ll];
+
+            if (dir == 0) {
+                if (lx + 1 < bx) {
+                    int ei = ll * gX * gY + gx * gY + gy;
+                    atomicMin(smem + (lx+1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
+                }
+                if (lx > 0) {
+                    int ei = ll * gX * gY + (gx-1) * gY + gy;
+                    atomicMin(smem + (lx-1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
+                }
+            }
+            if (dir == 1) {
+                if (ly + 1 < by) {
+                    int ei = ll * gX * gY + gx * gY + gy;
+                    atomicMin(smem + lx*by*L + (ly+1)*L + ll, d_u + EDGE_W_V(ei));
+                }
+                if (ly > 0) {
+                    int ei = ll * gX * gY + gx * gY + (gy-1);
+                    atomicMin(smem + lx*by*L + (ly-1)*L + ll, d_u + EDGE_W_V(ei));
+                }
+            }
+            if (add_via && ll + 1 < L) {
+                int ei = ll * gX * gY + gx * gY + gy;
+                atomicMin(smem + lx*by*L + ly*L + (ll+1), d_u + EDGE_W_VIA(ei));
+            }
+            if (add_via && ll > 0) {
+                int ei = (ll-1) * gX * gY + gx * gY + gy;
+                atomicMin(smem + lx*by*L + ly*L + (ll-1), d_u + EDGE_W_VIA(ei));
+            }
+        }
+        __syncthreads();
+    }
+#undef EDGE_W_H
+#undef EDGE_W_V
+#undef EDGE_W_VIA
+
+    // Write shared memory back to global dist[]
+    for (int li = (int)threadIdx.x; li < n_local; li += (int)blockDim.x)
+        gdist[li] = smem[li];
+}
+
+
 // Tie-breaking: among all equal-cost predecessors, select the one with the
 // smallest lambda (less congested), then smallest edge_id (deterministic).
 // Lambda is read-only during tracing — no race condition.
@@ -389,7 +421,12 @@ struct LagGPUCtx {
     int n_nets, total_dist_nodes, max_bf_iters;
     std::vector<NetGPU> h_nets;
 
-    NetGPU* d_nets          = nullptr;
+    NetGPU* d_nets          = nullptr;   // all nets (for trace, init)
+    NetGPU* d_nets_small    = nullptr;   // n_local <= SMALL_THRESH
+    NetGPU* d_nets_large    = nullptr;   // n_local >  SMALL_THRESH
+    int     n_small         = 0;
+    int     n_large         = 0;
+    int     max_small_n_local = 0;       // max n_local among small nets (smem size)
     int*    d_dist          = nullptr;
     float*  d_lam_h         = nullptr;
     float*  d_lam_v         = nullptr;
@@ -397,8 +434,6 @@ struct LagGPUCtx {
     float*  d_use_h         = nullptr;
     float*  d_use_v         = nullptr;
     float*  d_use_via       = nullptr;
-    // Previous-iteration usage: read-only during BF to compute dispersion term.
-    // Swapped with d_use_* after each trace step (device-device copy).
     float*  d_use_prev_h    = nullptr;
     float*  d_use_prev_v    = nullptr;
     float*  d_use_prev_via  = nullptr;
@@ -409,8 +444,8 @@ struct LagGPUCtx {
 
     float  unit_wire_cost, unit_via_cost;
     double step_size, step_decay, via_cap;
-    float  beta;          // forward-dispersion coefficient (from cfg.beta_dispersion)
-    float  ema_momentum;  // EMA smoothing for prev_use (0=no smooth, 0.7=recommended)
+    float  beta;
+    float  ema_momentum;
     bool   add_via;
 
     double t_bf = 0, t_trace = 0, t_lam = 0;
@@ -460,19 +495,46 @@ static LagGPUCtx* lag_gpu_init(
 
         dist_offset += ng.n_local;
         int diam = bx + by + L;
+        ng.max_bf_iters = diam;   // per-net exact BF diameter
         if (diam > max_diam) max_diam = diam;
     }
     ctx->total_dist_nodes = dist_offset;
     ctx->max_bf_iters     = max_diam;
 
+    // Partition nets into small (n_local <= SMALL_THRESH) and large subsets.
+    std::vector<NetGPU> h_nets_small, h_nets_large;
+    for (const NetGPU& ng : ctx->h_nets) {
+        if (ng.n_local <= SMALL_THRESH) {
+            h_nets_small.push_back(ng);
+            if (ng.n_local > ctx->max_small_n_local)
+                ctx->max_small_n_local = ng.n_local;
+        } else {
+            h_nets_large.push_back(ng);
+        }
+    }
+    ctx->n_small = (int)h_nets_small.size();
+    ctx->n_large = (int)h_nets_large.size();
+
     long long gpu_mb = ((long long)ctx->total_dist_nodes * 4
                        + (long long)ctx->LXY * 8 * 4) / 1024 / 1024;
     std::cout << "[lag_gpu] " << ctx->n_nets << " nets"
+              << "  small=" << ctx->n_small << " large=" << ctx->n_large
+              << "  max_small_n_local=" << ctx->max_small_n_local
               << "  total_dist_nodes=" << ctx->total_dist_nodes
               << "  max_bf_iters="     << max_diam
               << "  est_gpu_MB="       << gpu_mb << "\n";
 
     CUDA_CHECK(cudaMalloc(&ctx->d_nets,      ctx->n_nets * sizeof(NetGPU)));
+    if (ctx->n_small > 0) {
+        CUDA_CHECK(cudaMalloc(&ctx->d_nets_small, ctx->n_small * sizeof(NetGPU)));
+        CUDA_CHECK(cudaMemcpy(ctx->d_nets_small, h_nets_small.data(),
+                              ctx->n_small * sizeof(NetGPU), cudaMemcpyHostToDevice));
+    }
+    if (ctx->n_large > 0) {
+        CUDA_CHECK(cudaMalloc(&ctx->d_nets_large, ctx->n_large * sizeof(NetGPU)));
+        CUDA_CHECK(cudaMemcpy(ctx->d_nets_large, h_nets_large.data(),
+                              ctx->n_large * sizeof(NetGPU), cudaMemcpyHostToDevice));
+    }
     CUDA_CHECK(cudaMalloc(&ctx->d_dist,      ctx->total_dist_nodes * sizeof(int)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_h,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_v,     ctx->LXY * sizeof(float)));
@@ -543,17 +605,27 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         reset_int_kernel<<<grid_reset, 256>>>(ctx->d_dist, ctx->total_dist_nodes, INF_DIST);
         init_src_kernel<<<n_nets, 1>>>(ctx->d_nets, ctx->d_dist);
 
-        // Step 2: Single kernel launch runs all BF passes internally.
-        // Each net's block loops max_bf_iters times with __syncthreads() between passes,
-        // replacing the previous host-side loop of max_bf_iters separate kernel launches.
-        bf_iters_kernel<<<n_nets, 256>>>(
-            ctx->d_nets, ctx->d_dist,
-            ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
-            ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
-            ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
-            ctx->d_layer_dir, ctx->d_layer_sc,
-            ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
-            ctx->add_via, ctx->max_bf_iters, ctx->beta);
+        // Step 2: BF per net — small nets use shared-memory kernel, large use global.
+        // Each net's block reads max_bf_iters from NetGPU (exact per-net diameter),
+        // replacing the previous single global max_bf_iters broadcast.
+        if (ctx->n_small > 0)
+            bf_iters_small_kernel<<<ctx->n_small, 256, ctx->max_small_n_local * sizeof(int)>>>(
+                ctx->d_nets_small, ctx->d_dist,
+                ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+                ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+                ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
+                ctx->d_layer_dir, ctx->d_layer_sc,
+                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+                ctx->add_via, ctx->beta);
+        if (ctx->n_large > 0)
+            bf_iters_kernel<<<ctx->n_large, 256>>>(
+                ctx->d_nets_large, ctx->d_dist,
+                ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+                ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+                ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
+                ctx->d_layer_dir, ctx->d_layer_sc,
+                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+                ctx->add_via, ctx->beta);
         CUDA_CHECK(cudaDeviceSynchronize());
         auto t1 = std::chrono::steady_clock::now();
         ctx->t_bf += std::chrono::duration<double>(t1 - t0).count();
@@ -654,14 +726,24 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
         reset_int_kernel<<<(ctx->total_dist_nodes+255)/256, 256>>>(
             ctx->d_dist, ctx->total_dist_nodes, INF_DIST);
         init_src_kernel<<<n_nets, 1>>>(ctx->d_nets, ctx->d_dist);
-        bf_iters_kernel<<<n_nets, 256>>>(
-            ctx->d_nets, ctx->d_dist,
-            ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
-            ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
-            ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
-            ctx->d_layer_dir, ctx->d_layer_sc,
-            ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
-            ctx->add_via, ctx->max_bf_iters, /*beta=*/0.0f);
+        if (ctx->n_small > 0)
+            bf_iters_small_kernel<<<ctx->n_small, 256, ctx->max_small_n_local * sizeof(int)>>>(
+                ctx->d_nets_small, ctx->d_dist,
+                ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+                ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+                ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
+                ctx->d_layer_dir, ctx->d_layer_sc,
+                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+                ctx->add_via, /*beta=*/0.0f);
+        if (ctx->n_large > 0)
+            bf_iters_kernel<<<ctx->n_large, 256>>>(
+                ctx->d_nets_large, ctx->d_dist,
+                ctx->d_lam_h, ctx->d_lam_v, ctx->d_lam_via,
+                ctx->d_use_prev_h, ctx->d_use_prev_v, ctx->d_use_prev_via,
+                ctx->d_cap_h, ctx->d_cap_v, (float)ctx->via_cap,
+                ctx->d_layer_dir, ctx->d_layer_sc,
+                ctx->unit_wire_cost, ctx->unit_via_cost, gX, gY,
+                ctx->add_via, /*beta=*/0.0f);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 }
@@ -770,7 +852,10 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
 
 static void lag_gpu_free(LagGPUCtx* ctx) {
     if (!ctx) return;
-    cudaFree(ctx->d_nets);     cudaFree(ctx->d_dist);
+    cudaFree(ctx->d_nets);
+    if (ctx->d_nets_small) cudaFree(ctx->d_nets_small);
+    if (ctx->d_nets_large) cudaFree(ctx->d_nets_large);
+    cudaFree(ctx->d_dist);
     cudaFree(ctx->d_lam_h);   cudaFree(ctx->d_lam_v);   cudaFree(ctx->d_lam_via);
     cudaFree(ctx->d_use_h);   cudaFree(ctx->d_use_v);   cudaFree(ctx->d_use_via);
     cudaFree(ctx->d_use_prev_h); cudaFree(ctx->d_use_prev_v); cudaFree(ctx->d_use_prev_via);

@@ -129,8 +129,10 @@ router_lp -cap <file.cap> -net <file.net> -out <file.out>
           [--margin N]         bbox expansion for adaptive/lagrangian (default 5)
           [--batch-grid N]     centroid-bin resolution for adaptive (default 50)
           [--lag-iters N]      Lagrangian iterations (default 50)
-          [--lag-step F]       initial step size α_0 (default 0.5)
-          [--lag-decay F]      step decay exponent (default 0.5 = sqrt)
+          [--lag-step F]       initial step size α_0 (default 0.2)
+          [--lag-decay F]      step decay exponent (default 0.7)
+          [--lag-beta F]       forward-dispersion coefficient (default 0.5)
+          [--lag-ema F]        EMA momentum for prev_use smoothing (default 0.3)
           [--lag-gpu]          use GPU parallel BF backend (--mode lagrangian only)
           [--gpu N]            set CUDA_VISIBLE_DEVICES=N
           [--config yaml]      cuPDLPx param file (default: config/cupdlpx_routing_default.yaml)
@@ -189,17 +191,54 @@ bash scripts/run_subgraph_study.sh
 
 All runs on RTX 3090 (24 GB, sm_86), ariane133_51 benchmark.
 
-### Lagrangian CPU vs GPU (`--max-nets 10`, 27 two-pin nets, 50 iterations)
+### Lagrangian CPU vs GPU — quality parity (`--max-nets 50`, 100 iterations)
 
-| Backend | Routed | max_viol | bf/dijk time | total time |
-|---------|--------|----------|-------------|------------|
-| CPU Dijkstra | 27/27 | 2 | 11.0 s | 15.2 s |
-| GPU BF (`--lag-gpu`) | 27/27 | 7 | 5.4 s | 7.9 s |
+After quality fixes (see below), GPU Lagrangian matches CPU Dijkstra exactly:
 
-> **Note**: GPU max_viol is higher due to integer cost quantization (`×1000`)
-> altering tie-breaking vs float Dijkstra.  Both implementations correctly
-> route all nets.  Planned v2 improvement: inner BF loop inside kernel
-> reduces 12,800 kernel launches to 50 → estimated additional 3–5× speedup.
+| Backend | Routed | Disconnected | max_viol | total time |
+|---------|--------|-------------|----------|------------|
+| CPU Dijkstra | 128/128 | 0 | 5 | ~34 s |
+| GPU BF (`--lag-gpu`) | 128/128 | 0 | 5 | ~12 s |
+
+**~3× speedup** with identical solution quality.
+
+### Root cause of the original GPU quality gap (max_viol=104 vs CPU=5)
+
+The gap was caused by **integer BF exact-cost ties → multi-net path clustering → usage stacking**:
+
+1. **Integer quantization** (`COST_SCALE=1000`): many distinct float costs become equal integers.
+   Multiple nets independently pick the same minimum-cost path because all ties look identical.
+
+2. **Path clustering**: when 10+ nets share exactly the same cheapest edge sequence, their
+   usage vectors all point at the same set of edges.  After the first λ update those edges get
+   penalized together, but BF on the next iteration still breaks ties the same way → oscillation.
+
+3. **Subgradient oscillation**: the fixed bias amplifies the oscillation — max_viol bounces
+   between ~80 and ~120 instead of converging.
+
+### Three-stage fix (`lagrangian_gpu.cu`)
+
+| Stage | Technique | Effect |
+|-------|-----------|--------|
+| 1 | **Deterministic eps perturbation** `(ni*7+ei)%11` added to each edge weight | Breaks integer ties: distinct nets now get distinct costs on the same edge |
+| 2 | **Forward dispersion term** `β × use_prev/cap` in BF edge cost | Discourages already-congested edges during path selection; reduces initial clustering |
+| 3 | **EMA smoothing** `prev_use ← γ·prev_use + (1-γ)·use` (γ=0.3) | Damps 2-period oscillation caused by dispersion alternating between two congestion states |
+
+All three stages share the same formula in `bf_iters_kernel`, `bf_iters_small_kernel`,
+`trace_and_use_kernel`, and `lag_gpu_extract_routes` — consistency is required for
+the predecessor-match condition `dist[v]+w == d_cur` to hold.
+
+### Bbox bucketing + shared memory optimization
+
+Nets with small bounding boxes (`n_local ≤ 2048 nodes`) use `bf_iters_small_kernel`:
+their `dist[]` array is loaded into `__shared__` memory before BF passes begin, and
+`atomicMin` operates on shared instead of global memory (~100× lower latency).
+Large nets continue using `bf_iters_kernel` with global atomics.
+
+At init, `lag_gpu_init` partitions nets into `d_nets_small` / `d_nets_large` and stores
+`max_small_n_local` for the dynamic shared memory allocation.  Each net also stores its
+exact BF diameter (`max_bf_iters = bx+by+L`) so blocks run only the required passes
+instead of the global maximum.
 
 ### Mode comparison on mempool_tile_rank (`--max-nets 500 --max-hpwl 30`)
 
@@ -213,13 +252,19 @@ All runs on RTX 3090 (24 GB, sm_86), ariane133_51 benchmark.
 
 ```
 Per Lagrangian iteration:
-  1. reset_int_kernel      -- d_dist[:] = INF
-  2. init_src_kernel       -- d_dist[src_li] = 0 per net
-  3. bf_pass_kernel × D    -- D = max(bx+by+L) BF passes, all nets concurrent
-     └─ one block/net, 256 threads, atomicMin(int) on d_dist
-  4. reset_float_kernel    -- d_use[:] = 0
-  5. trace_and_use_kernel  -- snk→src walk, atomicAdd usage, one thread/net
-  6. update_lam_kernel     -- λ_e ← max(0, λ_e + α*(use-cap))  elementwise
+  1. reset_int_kernel        -- d_dist[:] = INF
+  2. init_src_kernel         -- d_dist[src_li] = 0 per net
+  3a. bf_iters_small_kernel  -- small nets (n_local<=2048): dist[] in __shared__,
+     └─ one block/net, 256 threads, atomicMin(int) on shared mem; writeback at end
+  3b. bf_iters_kernel        -- large nets: same but atomicMin on global d_dist
+     └─ each block loops net.max_bf_iters (= bx+by+L) times, not global max
+     └─ cost = (base + λ + β*use_prev/cap)*1000 + eps(ni,ei)   [eps breaks int ties]
+  4. reset_float_kernel      -- d_use[:] = 0
+  5. trace_and_use_kernel    -- snk→src walk, atomicAdd usage, one thread/net
+     └─ cost formula must match bf_iters exactly for predecessor matching
+  6. update_lam_kernel       -- λ_e ← max(0, λ_e + α*(use-cap))  elementwise
+     └─ EMA: use_prev ← γ·use_prev + (1-γ)·use  (γ=0.3, damps oscillation)
+  Final (if β>0): one extra clean BF with β=0 for consistent CPU path extraction
 
 Memory on GPU (ariane, --max-nets 100):
   d_dist:    ~39 MB  (packed per-net int arrays)
@@ -255,9 +300,10 @@ Host↔Device transfers:
 | B3 | Windowed + adaptive routing modes | Done |
 | B3+ | Lagrangian decomposition (CPU Dijkstra) | Done |
 | B3+ | Lagrangian GPU parallel BF (`--lag-gpu`) | Done |
-| v2  | Inner BF loop (50 kernel launches vs 12800) | Planned |
-| v2  | Size bucketing + shared memory for small bboxes | Planned |
-| v2  | CUDA Graph batch submission | Planned |
+| v1  | Inner BF loop (50 kernel launches vs 12800) | Done |
+| v1  | GPU quality parity (eps + dispersion + EMA → max_viol matches CPU) | Done |
+| v2  | Bbox bucketing + shared memory for small nets (n_local ≤ 2048) | Done |
+| v3  | CUDA Graph batch submission | Planned |
 | v3  | Full-scale Lagrangian + cuPDLPx hotspot polishing | Planned |
 
 ---
