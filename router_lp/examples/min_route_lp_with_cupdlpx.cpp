@@ -18,8 +18,9 @@
  *   var_idx(n,e,d) = n*n_edges*2 + e*2 + d
  *
  * Constraints:
- *   Capacity (4):   Σ_n (x[n][e][0]+x[n][e][1]) ≤ 1  per undirected edge
- *   Flow cons (16): net outflow from each (net,node) = demand  (4 nodes × 2 nets × 2 dirs)
+ *   Capacity (4):    Σ_n (x[n][e][0]+x[n][e][1]) ≤ 1  per undirected edge
+ *   Flow cons (8):   net outflow = demand  (4 nodes × 2 nets)
+ *   Total rows: 12
  *     demand = +1 source, -1 sink, 0 intermediate
  *     Flow conservation: Σ_{e:tail=v} x[n,e,0] - Σ_{e:tail=v} x[n,e,1]
  *                      + Σ_{e:head=v} x[n,e,1] - Σ_{e:head=v} x[n,e,0] = demand(n,v)

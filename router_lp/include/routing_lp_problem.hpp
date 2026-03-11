@@ -69,18 +69,16 @@ struct RoutingLPProblem {
 };
 
 struct RoutingLPSolution {
-    enum class Status { OPTIMAL, FEAS, INFEASIBLE, TIME_LIMIT, ITER_LIMIT, UNKNOWN };
+    enum class Status { OPTIMAL, INFEASIBLE, TIME_LIMIT, ITER_LIMIT, UNKNOWN };
     Status status;
     double obj_value;
     std::vector<double> x;  // primal solution [n_vars]
     double solve_time_s;
     int iterations;
 
-    // True only when solver found an optimal or feasibility-polished solution.
+    // True only when solver found an optimal (or feasibility-polished) solution.
     // TIME_LIMIT / ITER_LIMIT are NOT considered "solved" for downstream use.
-    bool is_solved() const {
-        return status == Status::OPTIMAL || status == Status::FEAS;
-    }
+    bool is_solved() const { return status == Status::OPTIMAL; }
 };
 
 } // namespace rlp

@@ -29,10 +29,13 @@ static bool load_yaml_params(const std::string& path, pdhg_parameters_t& params)
         if (colon == std::string::npos) continue;
         std::string key = line.substr(0, colon);
         std::string val = line.substr(colon + 1);
-        // Trim
+        // Trim leading and trailing whitespace
         auto trim = [](std::string& s) {
-            s.erase(0, s.find_first_not_of(" \t\r\n"));
-            s.erase(s.find_last_not_of(" \t\r\n") + 1);
+            auto first = s.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) { s.clear(); return; }
+            s.erase(0, first);
+            auto last = s.find_last_not_of(" \t\r\n");
+            if (last != std::string::npos) s.erase(last + 1);
         };
         trim(key); trim(val);
         if (val.empty()) continue;
@@ -160,8 +163,7 @@ bool solve_routing_lp(const RoutingLPProblem& prob,
     cupdlpx_result_free(res);
     lp_problem_free(lp);
 
-    return (sol.status == RoutingLPSolution::Status::OPTIMAL ||
-            sol.status == RoutingLPSolution::Status::FEAS);
+    return sol.is_solved();
 }
 
 } // namespace rlp

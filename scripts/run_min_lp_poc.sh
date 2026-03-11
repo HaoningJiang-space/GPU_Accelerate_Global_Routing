@@ -15,7 +15,7 @@ CUPDLPX_BUILD="${CUPDLPX_BUILD_DIR:-/tmp/cupdlpx_build}"
 PSLP_INC="$CUPDLPX_BUILD/_deps/pslp-src/include/PSLP"
 SRC="$REPO_ROOT/router_lp/examples/min_route_lp_with_cupdlpx.cpp"
 BIN="$REPO_ROOT/router_lp/examples/min_route_lp_poc"
-GPU_ID="${GPU_ID:-0}"
+GPU_ID="${GPU_ID:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -23,13 +23,9 @@ while [[ $# -gt 0 ]]; do
     *)     echo "Unknown arg: $1"; exit 1 ;;
   esac
 done
-
-# Validate GPU index exists
-GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
-if [[ "$GPU_ID" -ge "$GPU_COUNT" ]]; then
-  echo "[b0-poc] WARNING: GPU $GPU_ID not found (total $GPU_COUNT). Falling back to GPU 0."
-  GPU_ID=0
-fi
+# GPU validation intentionally omitted: nvidia-smi returns rc=255 on this server
+# (some device handles unavailable). CUDA will report an error if the device is
+# missing. Use 'nvitop' to check available GPU indices before running.
 
 echo "[b0-poc] Compiling..."
 g++ -std=c++17 -O2 \
