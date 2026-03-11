@@ -49,10 +49,15 @@ static void enumerate_edges(const GridInfo& grid,
 {
     int id = (int)edges.size();
     for (int l = l0; l <= l1; ++l) {
+        // Layer 0 is the pin-access layer (not a routing layer).
+        // The evaluator never sets a direction for layer 0 (NVR_DIR_NONE),
+        // so any wire segment on layer 0 triggers an assertion failure.
+        // Only via edges (l=0 → l=1) are allowed to touch layer 0.
+        const bool routing_layer = (l > 0);
         for (int x = x0; x <= x1; ++x) {
             for (int y = y0; y <= y1; ++y) {
-                // H-edge: only valid on H-direction layers (dir==0)
-                if (x+1 <= x1 && grid.layer_dir[l] == 0) {
+                // H-edge: only valid on H-direction routing layers (dir==0, l>0)
+                if (routing_layer && x+1 <= x1 && grid.layer_dir[l] == 0) {
                     auto k = edge_key(l, x, y, 0);
                     if (key_to_idx.find(k) == key_to_idx.end()) {
                         double cap  = grid.cap[l][x][y];
@@ -61,8 +66,8 @@ static void enumerate_edges(const GridInfo& grid,
                         key_to_idx[k] = id++;
                     }
                 }
-                // V-edge: only valid on V-direction layers (dir==1)
-                if (y+1 <= y1 && grid.layer_dir[l] == 1) {
+                // V-edge: only valid on V-direction routing layers (dir==1, l>0)
+                if (routing_layer && y+1 <= y1 && grid.layer_dir[l] == 1) {
                     auto k = edge_key(l, x, y, 1);
                     if (key_to_idx.find(k) == key_to_idx.end()) {
                         double cap  = grid.cap[l][x][y];

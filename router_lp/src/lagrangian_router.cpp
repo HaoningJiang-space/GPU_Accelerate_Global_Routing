@@ -94,8 +94,8 @@ static std::vector<PathSeg> dijkstra_net(
         int yy  = tmp % by + y0;
         int xx  = tmp / by + x0;
 
-        // ── H-edges (layer preferred direction = 0) ───────────────────────────
-        if (grid.layer_dir[llu] == 0) {
+        // ── H-edges (layer preferred direction = 0, l>0) ────────────────────
+        if (llu > 0 && grid.layer_dir[llu] == 0) {
             float base = (float)(grid.unit_wire_cost * grid.layer_short_cost[llu]);
             // Forward: (xx,yy,llu) → (xx+1,yy,llu)
             if (xx + 1 <= x1) {
@@ -123,8 +123,8 @@ static std::vector<PathSeg> dijkstra_net(
             }
         }
 
-        // ── V-edges (layer preferred direction = 1) ───────────────────────────
-        if (grid.layer_dir[llu] == 1) {
+        // ── V-edges (layer preferred direction = 1, l>0) ────────────────────
+        if (llu > 0 && grid.layer_dir[llu] == 1) {
             float base = (float)(grid.unit_wire_cost * grid.layer_short_cost[llu]);
             if (yy + 1 <= y1) {
                 int ei = edge_idx(llu, xx, yy, X, Y);

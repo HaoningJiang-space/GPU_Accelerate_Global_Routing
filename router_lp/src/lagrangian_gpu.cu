@@ -148,7 +148,7 @@ __global__ void bf_iters_kernel(
             float base_via  = unit_via_cost;
             int   dir       = d_layer_dir[ll];
 
-            if (dir == 0) {
+            if (dir == 0 && ll > 0) {
                 if (lx + 1 < bx) {
                     int ei = ll * gX * gY + gx * gY + gy;
                     atomicMin(dist + (lx+1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
@@ -158,7 +158,7 @@ __global__ void bf_iters_kernel(
                     atomicMin(dist + (lx-1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
                 }
             }
-            if (dir == 1) {
+            if (dir == 1 && ll > 0) {
                 if (ly + 1 < by) {
                     int ei = ll * gX * gY + gx * gY + gy;
                     atomicMin(dist + lx*by*L + (ly+1)*L + ll, d_u + EDGE_W_V(ei));
@@ -249,7 +249,7 @@ __global__ void bf_iters_small_kernel(
             float base_via  = unit_via_cost;
             int   dir       = d_layer_dir[ll];
 
-            if (dir == 0) {
+            if (dir == 0 && ll > 0) {
                 if (lx + 1 < bx) {
                     int ei = ll * gX * gY + gx * gY + gy;
                     atomicMin(smem + (lx+1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
@@ -259,7 +259,7 @@ __global__ void bf_iters_small_kernel(
                     atomicMin(smem + (lx-1)*by*L + ly*L + ll, d_u + EDGE_W_H(ei));
                 }
             }
-            if (dir == 1) {
+            if (dir == 1 && ll > 0) {
                 if (ly + 1 < by) {
                     int ei = ll * gX * gY + gx * gY + gy;
                     atomicMin(smem + lx*by*L + (ly+1)*L + ll, d_u + EDGE_W_V(ei));
@@ -376,11 +376,11 @@ __global__ void trace_and_use_kernel(
         if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
             best_v=v__; best_ei=ei__; best_type=2; best_lam=lam__; } } }
 
-        if (dir == 0) {
+        if (dir == 0 && ll > 0) {
             if (lx+1 < bx) CHECK_PRED_H((lx+1)*by*L+ly*L+ll, ll*gX*gY+gx*gY+gy)
             if (lx > 0)    CHECK_PRED_H((lx-1)*by*L+ly*L+ll,  ll*gX*gY+(gx-1)*gY+gy)
         }
-        if (dir == 1) {
+        if (dir == 1 && ll > 0) {
             if (ly+1 < by) CHECK_PRED_V(lx*by*L+(ly+1)*L+ll, ll*gX*gY+gx*gY+gy)
             if (ly > 0)    CHECK_PRED_V(lx*by*L+(ly-1)*L+ll,  ll*gX*gY+gx*gY+(gy-1))
         }
@@ -827,13 +827,13 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
                     best = {v, ei, type, sx1,sy1,sz1,sx2,sy2,sz2, lam};
             };
 
-            if (dir == 0) {
+            if (dir == 0 && ll > 0) {
                 if (lx+1 < bx) { int v=(lx+1)*by*L+ly*L+ll, ei=ll*gX*gY+gx*gY+gy;
                     consider(v,ei,h_lam_h[ei],0, gx,gy,ll, gx+1,gy,ll, base_wire,h_lam_h); }
                 if (lx > 0)    { int v=(lx-1)*by*L+ly*L+ll, ei=ll*gX*gY+(gx-1)*gY+gy;
                     consider(v,ei,h_lam_h[ei],0, gx-1,gy,ll, gx,gy,ll, base_wire,h_lam_h); }
             }
-            if (dir == 1) {
+            if (dir == 1 && ll > 0) {
                 if (ly+1 < by) { int v=lx*by*L+(ly+1)*L+ll, ei=ll*gX*gY+gx*gY+gy;
                     consider(v,ei,h_lam_v[ei],1, gx,gy,ll, gx,gy+1,ll, base_wire,h_lam_v); }
                 if (ly > 0)    { int v=lx*by*L+(ly-1)*L+ll, ei=ll*gX*gY+gx*gY+(gy-1);
