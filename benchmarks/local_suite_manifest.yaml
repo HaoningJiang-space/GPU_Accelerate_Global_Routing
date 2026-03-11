@@ -1,0 +1,24 @@
+# Local benchmark suite manifest
+# Three tiers: tiny / small / medium
+# Add larger ISPD2024 cases to small/medium as they become available.
+# Download ISPD2024 benchmarks: https://drive.google.com/drive/folders/1bon65UEAx8cjSvVhYJ-lgC8QMDX0fvUm
+
+cases:
+  - name: mempool_tile_rank
+    tier: tiny
+    cap: InstantGR/benchmarks/mempool_tile_rank.cap
+    net: InstantGR/benchmarks/mempool_tile_rank.net
+    out: results/baseline/mempool_tile_rank/route.out
+
+  # Uncomment and fill in paths when ISPD2024 cases are downloaded:
+  # - name: ispd24_case1
+  #   tier: small
+  #   cap: benchmarks/ispd24/case1.cap
+  #   net: benchmarks/ispd24/case1.net
+  #   out: results/baseline/ispd24_case1/route.out
+
+  # - name: ispd24_case2
+  #   tier: medium
+  #   cap: benchmarks/ispd24/case2.cap
+  #   net: benchmarks/ispd24/case2.net
+  #   out: results/baseline/ispd24_case2/route.out

@@ -1,0 +1,2 @@
+case,tier,wirelength_cost,via_cost,overflow_cost,total_cost,open_nets,incompleted_nets,runtime_s,timestamp
+mempool_tile_rank,tiny,7553701,3212488,3008599,13774789,0,0,5.495,2026-03-11T20:23:58
