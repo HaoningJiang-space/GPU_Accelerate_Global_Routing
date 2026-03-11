@@ -20,6 +20,7 @@
 #include "include/solution_rounding.hpp"
 #include "include/windowed_routing.hpp"
 #include "include/adaptive_routing.hpp"
+#include "include/lagrangian_router.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -32,8 +33,9 @@ static void usage(const char* prog) {
     std::cerr
         << "Usage: " << prog
         << " -cap <cap> -net <net> -out <out>"
-           " [--mode pure_lp|windowed] [--max-nets N] [--max-hpwl N]"
-           " [--window-x N] [--window-y N]"
+           " [--mode pure_lp|windowed|adaptive|lagrangian] [--max-nets N] [--max-hpwl N]"
+           " [--window-x N] [--window-y N] [--margin N] [--batch-grid N]"
+           " [--lag-iters N] [--lag-step F] [--lag-decay F]"
            " [--gpu N] [--config yaml] [--threshold T] [--no-via]"
            " [--inexact-tol T]\n";
 }
@@ -49,6 +51,9 @@ int main(int argc, char* argv[]) {
     int    window_y       = 40;
     int    margin         = 5;
     int    batch_grid     = 50;
+    int    lag_iters      = 50;
+    double lag_step       = 0.5;
+    double lag_decay      = 0.5;
     int    gpu_id         = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
     double threshold      = 0.1;
     double inexact_tol    = 1e-3;
@@ -70,6 +75,9 @@ int main(int argc, char* argv[]) {
         else if (a == "--window-y")     window_y    = std::stoi(next());
         else if (a == "--margin")       margin      = std::stoi(next());
         else if (a == "--batch-grid")   batch_grid  = std::stoi(next());
+        else if (a == "--lag-iters")    lag_iters   = std::stoi(next());
+        else if (a == "--lag-step")     lag_step    = std::stod(next());
+        else if (a == "--lag-decay")    lag_decay   = std::stod(next());
         else if (a == "--gpu")          gpu_id      = std::stoi(next());
         else if (a == "--threshold")    threshold   = std::stod(next());
         else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
@@ -210,6 +218,53 @@ int main(int argc, char* argv[]) {
                   << "  output       : " << out_path                  << "\n";
 
         bool success = (astats.n_nets_routed > 0 && astats.n_nets_disconnected == 0);
+        return success ? 0 : 1;
+    }
+
+    // ── Lagrangian mode ───────────────────────────────────────────────────────
+    if (mode == "lagrangian") {
+        rlp::LagrangianConfig lcfg;
+        lcfg.max_iters  = lag_iters;
+        lcfg.step_size  = lag_step;
+        lcfg.step_decay = lag_decay;
+        lcfg.margin     = margin;
+        lcfg.add_via    = add_via;
+        lcfg.log_every  = 10;
+
+        rlp::LagrangianStats lstats;
+        auto routes = rlp::run_lagrangian_routing(twonets, grid, lcfg, lstats);
+
+        if (!rlp::write_out_file(out_path, routes)) {
+            std::cerr << "[main] Failed to write output\n"; return 1;
+        }
+
+        double wall_time = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - wall0).count();
+
+        std::cout << "\n=== router_lp summary ===\n"
+                  << "  mode         : lagrangian\n"
+                  << "  lag_iters    : " << lstats.iters_run           << "\n"
+                  << "  lag_step     : " << lag_step                   << "\n"
+                  << "  lag_decay    : " << lag_decay                  << "\n"
+                  << "  margin       : " << margin                     << "\n"
+                  << "  n_vars       : N/A (per-net Dijkstra)\n"
+                  << "  n_cons       : N/A\n"
+                  << "  nnz          : N/A\n"
+                  << "  n_nets_in    : " << lstats.n_nets_routed + lstats.n_nets_disconnected << "\n"
+                  << "  routed_nets  : " << lstats.n_nets_routed       << "\n"
+                  << "  disconnected : " << lstats.n_nets_disconnected  << "\n"
+                  << "  max_viol     : " << lstats.final_max_violation  << "\n"
+                  << "  avg_viol     : " << lstats.final_avg_violation  << "\n"
+                  << "  obj_value    : N/A\n"
+                  << "  iterations   : " << lstats.iters_run           << "\n"
+                  << "  build_time   : 0s\n"
+                  << "  solve_time   : " << lstats.total_dijkstra_time  << "s\n"
+                  << "  round_time   : 0s\n"
+                  << "  total_time   : " << wall_time                  << "s\n"
+                  << "  output       : " << out_path                   << "\n";
+
+        bool success = (lstats.n_nets_routed > 0 && lstats.n_nets_disconnected == 0
+                        && lstats.final_max_violation <= 0.0);
         return success ? 0 : 1;
     }
 

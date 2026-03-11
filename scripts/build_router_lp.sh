@@ -18,6 +18,7 @@ SRCS=(
     "${REPO}/router_lp/src/solution_rounding.cpp"
     "${REPO}/router_lp/src/windowed_routing.cpp"
     "${REPO}/router_lp/src/adaptive_routing.cpp"
+    "${REPO}/router_lp/src/lagrangian_router.cpp"
 )
 
 echo "[build] Compiling router_lp..."
