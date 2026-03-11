@@ -47,6 +47,7 @@ int main(int argc, char* argv[]) {
     std::string mode      = "pure_lp";
     int    max_nets       = 0;
     int    max_hpwl       = 40;
+    bool   max_hpwl_set   = false;
     int    window_x       = 40;
     int    window_y       = 40;
     int    margin         = 5;
@@ -70,7 +71,7 @@ int main(int argc, char* argv[]) {
         else if (a == "-out")           out_path    = next();
         else if (a == "--config")       config_path = next();
         else if (a == "--max-nets")     max_nets    = std::stoi(next());
-        else if (a == "--max-hpwl")     max_hpwl    = std::stoi(next());
+        else if (a == "--max-hpwl")     { max_hpwl = std::stoi(next()); max_hpwl_set = true; }
         else if (a == "--window-x")     window_x    = std::stoi(next());
         else if (a == "--window-y")     window_y    = std::stoi(next());
         else if (a == "--margin")       margin      = std::stoi(next());
@@ -135,8 +136,44 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "[main] 2-pin nets: " << twonets.size() << "  mode=" << mode << "\n";
 
+    // ── Validate mode ─────────────────────────────────────────────────────────
+    static const char* const VALID_MODES[] = {
+        "pure_lp", "windowed", "adaptive", "lagrangian", nullptr
+    };
+    bool mode_ok = false;
+    for (const char* const* m = VALID_MODES; *m; ++m)
+        if (mode == *m) { mode_ok = true; break; }
+    if (!mode_ok) {
+        std::cerr << "[main] Unknown mode: '" << mode << "'. "
+                     "Valid: pure_lp, windowed, adaptive, lagrangian\n";
+        usage(argv[0]); return 1;
+    }
+
+    // ── Per-net HPWL filter for non-LP modes ──────────────────────────────────
+    // pure_lp: max_hpwl is the joint-bbox limit handled inside build_routing_lp.
+    // windowed / adaptive / lagrangian: filter individual 2-pin nets by HPWL
+    // only when --max-hpwl was explicitly provided (preserving existing defaults).
+    if (mode != "pure_lp" && max_hpwl_set && max_hpwl > 0) {
+        auto rm = std::remove_if(twonets.begin(), twonets.end(),
+            [&](const rlp::TwoNet& n) {
+                int h = std::abs(n.src.loc.x - n.snk.loc.x)
+                      + std::abs(n.src.loc.y - n.snk.loc.y);
+                return h > max_hpwl;
+            });
+        int removed = (int)(twonets.end() - rm);
+        twonets.erase(rm, twonets.end());
+        std::cout << "[main] HPWL filter (per-net, max=" << max_hpwl
+                  << "): kept " << twonets.size()
+                  << " removed " << removed << "\n";
+    }
+
     // ── Windowed mode ─────────────────────────────────────────────────────────
     if (mode == "windowed") {
+        if (window_x <= 0 || window_y <= 0) {
+            std::cerr << "[main] --window-x and --window-y must be > 0"
+                         " (got " << window_x << "x" << window_y << ")\n";
+            return 1;
+        }
         rlp::WindowedRoutingConfig wcfg;
         wcfg.window_x          = window_x;
         wcfg.window_y          = window_y;

@@ -313,7 +313,22 @@ std::vector<NetRoute> run_lagrangian_routing(
                 }
             }
         }
-        // Via edges (use fixed cap = cfg.via_cap; no λ update for vias)
+        // Via-edges: update λ and track violation when vias are enabled
+        if (cfg.add_via) {
+            for (int l = 0; l < L - 1; ++l) {
+                for (int x = 0; x < X; ++x) {
+                    for (int y = 0; y < Y; ++y) {
+                        int idx = edge_idx(l, x, y, X, Y);
+                        float cap  = (float)cfg.via_cap;
+                        float viol = use_via[idx] - cap;
+                        if (viol > (float)max_viol) max_viol = viol;
+                        if (viol > 0) { sum_viol += viol; ++n_overload; }
+                        lam_via[idx] = std::max(0.0f,
+                            lam_via[idx] + (float)(alpha * viol));
+                    }
+                }
+            }
+        }
 
         stats.total_update_time +=
             std::chrono::duration<double>(
