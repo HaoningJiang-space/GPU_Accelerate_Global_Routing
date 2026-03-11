@@ -1,0 +1,10 @@
+experiment,benchmark,max_hpwl,max_nets,n_vars,n_cons,nnz,n_nets_in,routed,disconnected,solve_time_s,round_time_s,total_time_s,status
+A-hpwl,mempool_tile_rank,10,500,?,?,?,?,0,?,?,?,?,NO_NETS
+A-hpwl,mempool_tile_rank,20,500,?,?,?,?,0,?,?,?,?,NO_NETS
+A-hpwl,mempool_tile_rank,30,500,4104,1980,12312,3,3,0,0.404316,4.8954e-05,0.902872,OK
+A-hpwl,mempool_tile_rank,50,500,?,?,?,?,0,?,?,?,?,SKIPPED_OVERSIZE
+A-hpwl,mempool_tile_rank,100,500,?,?,?,?,0,?,?,?,?,SKIPPED_OVERSIZE
+B-nets,ariane133_51,10000,5,1628872,550204,4886616,14,0,14,3.69297,0,5.41255,SOLVER_LIMIT
+B-nets,ariane133_51,10000,10,3319380,1063845,9958140,27,0,27,6.59517,0,8.62364,SOLVER_LIMIT
+B-nets,ariane133_51,10000,20,?,?,?,?,0,?,?,?,?,SKIPPED_OVERSIZE
+B-nets,ariane133_51,10000,50,?,?,?,?,0,?,?,?,?,SKIPPED_OVERSIZE

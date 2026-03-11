@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <tuple>
 #include <functional>
@@ -157,7 +158,32 @@ bool build_routing_lp(const std::vector<TwoNet>& all_nets,
               << "l=[" << l0 << "," << l1 << "] x=[" << x0 << "," << x1
               << "] y=[" << y0 << "," << y1 << "]\n";
 
-    // 3. Enumerate subgraph edges
+    // 3. Pre-flight size estimate before expensive enumeration.
+    //    Estimate upper-bound on n_edges from bbox dimensions so we can
+    //    reject obviously oversized problems without allocating anything.
+    {
+        int64_t bx = x1 - x0 + 1, by = y1 - y0 + 1, bl = l1 - l0 + 1;
+        // H-edges: (bx-1)*by per H-layer, V-edges: bx*(by-1) per V-layer
+        // Via-edges: bx*by*(bl-1) if enabled.  Use worst-case: all layers both dirs.
+        int64_t est_edges = bl * (bx * by * 2LL) +
+                            (cfg.add_via_edges ? bx * by * (bl > 1 ? bl - 1 : 0) : 0);
+        int64_t n_nets64  = (int64_t)nets.size();
+        int64_t est_vars  = n_nets64 * est_edges * 2LL;
+        constexpr int64_t MAX_VARS_EST = 10'000'000LL;
+        if (est_vars > MAX_VARS_EST) {
+            std::cerr << "[lp_builder] Pre-flight reject: est_n_vars=" << est_vars
+                      << " > limit=" << MAX_VARS_EST
+                      << "\n  bbox l=[" << l0 << "," << l1 << "]"
+                      << " x=[" << x0 << "," << x1 << "]"
+                      << " y=[" << y0 << "," << y1 << "]"
+                      << "  n_nets=" << n_nets64
+                      << "  est_edges=" << est_edges
+                      << "\n  Reduce --max-nets or --max-hpwl to shrink the joint bounding box.\n";
+            return false;
+        }
+    }
+
+    // 3b. Now enumerate edges (safe: pre-flight passed)
     std::vector<Edge> edges;
     std::unordered_map<EdgeKey,int,EdgeKeyHash> key_to_idx;
     enumerate_edges(grid, l0, l1, x0, x1, y0, y1, cfg.add_via_edges, edges, key_to_idx);
@@ -183,17 +209,57 @@ bool build_routing_lp(const std::vector<TwoNet>& all_nets,
     }
     int n_nodes_sub = (int)node_map_raw.size();
 
-    // var_idx(net, edge, dir): dir ∈ {0=fwd, 1=bwd}
+    // ── Comprehensive overflow guard ─────────────────────────────────────────
+    // All size multiplications done in int64_t; abort if any exceeds limits.
+    constexpr int64_t MAX_VARS = 10'000'000LL;        // LP variables
+    constexpr int64_t MAX_CONS = 20'000'000LL;        // LP constraints
+    constexpr int64_t MAX_NNZ  = 100'000'000LL;       // CSR non-zeros
+    constexpr int64_t MAX_INT  = (int64_t)INT_MAX;
+
+    int64_t n_nets64       = n_nets;
+    int64_t n_edges64      = n_edges;
+    int64_t n_nodes64      = n_nodes_sub;
+    int64_t n_vars64       = n_nets64 * n_edges64 * 2LL;
+    int64_t n_flow_cons64  = n_nets64 * n_nodes64;
+    int64_t n_cons64       = n_edges64 + n_flow_cons64;
+    // NNZ upper bound: cap rows (2*n_nets per edge) + flow rows (4 entries per edge per net)
+    int64_t nnz64          = n_edges64 * n_nets64 * 2LL   // capacity block
+                           + n_edges64 * n_nets64 * 4LL;  // flow block (2 nodes × 2 dirs)
+
+    auto check = [&](const char* name, int64_t val, int64_t limit) -> bool {
+        if (val > limit) {
+            std::cerr << "[lp_builder] Overflow guard: " << name << "=" << val
+                      << " > limit=" << limit
+                      << "  (n_nets=" << n_nets64
+                      << " n_edges=" << n_edges64
+                      << " n_nodes_sub=" << n_nodes64 << ")\n"
+                      << "  Reduce --max-nets or --max-hpwl.\n";
+            return false;
+        }
+        return true;
+    };
+    if (!check("n_vars",      n_vars64,      MAX_VARS)) return false;
+    if (!check("n_cons",      n_cons64,      MAX_CONS)) return false;
+    if (!check("nnz",         nnz64,         MAX_NNZ))  return false;
+    if (!check("n_vars/INT",  n_vars64,      MAX_INT))  return false;
+    if (!check("n_cons/INT",  n_cons64,      MAX_INT))  return false;
+    if (!check("nnz/INT",     nnz64,         MAX_INT))  return false;
+
+    // Also guard total_nodes used for node_map below
+    int64_t total_nodes64 = (int64_t)grid.L * grid.X * grid.Y;
+    if (!check("total_nodes/INT", total_nodes64, MAX_INT)) return false;
+
+    int n_vars = (int)n_vars64;
+    int n_cons = (int)n_cons64;
+
+    // var_idx: safe because n_vars <= MAX_VARS <= INT_MAX
     auto var_idx = [&](int n, int e, int d) -> int {
         return n * n_edges * 2 + e * 2 + d;
     };
-    int n_vars = n_nets * n_edges * 2;
 
     // 5. Constraint layout:
     //    rows [0 .. n_edges-1]                   : capacity
     //    rows [n_edges .. n_edges+n_nets*n_nodes_sub-1]: flow conservation
-    int n_flow_cons = n_nets * n_nodes_sub;
-    int n_cons = n_edges + n_flow_cons;
 
     COOMatrix A;
     A.n_rows = n_cons;
