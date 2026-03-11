@@ -66,14 +66,14 @@ YAML
         --config "${TMPYAML}" \
         > "${TMPLOG}" 2>&1 || true
 
-    # Extract metrics from summary block
-    routed=$(grep  "^  routed_nets"  "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
-    disconn=$(grep "^  disconnected" "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
-    stime=$(grep   "^  solve_time"   "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' s')
-    iters=$(grep   "^  iterations"   "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
-    obj=$(grep     "^  obj_value"    "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
-    nvars=$(grep   "^  n_vars"       "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
-    ncons=$(grep   "^  n_cons"       "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ')
+    # Extract metrics from summary block (grep may return RC=1 if pattern absent; || true)
+    routed=$(grep  "^  routed_nets"  "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    disconn=$(grep "^  disconnected" "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    stime=$(grep   "^  solve_time"   "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' s' || true)
+    iters=$(grep   "^  iterations"   "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    obj=$(grep     "^  obj_value"    "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    nvars=$(grep   "^  n_vars"       "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
+    ncons=$(grep   "^  n_cons"       "${TMPLOG}" | awk -F': ' '{print $2}' | tr -d ' ' || true)
 
     # Determine status label
     if grep -qF "CUDA_VISIBLE_DEVICES" "${TMPLOG}" && grep -qF "routed_nets" "${TMPLOG}"; then

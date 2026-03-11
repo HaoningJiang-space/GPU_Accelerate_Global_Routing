@@ -1,0 +1,8 @@
+# Best params from B2 param sweep (mempool_tile_rank, 3 nets)
+# Pareto winner: fastest solve with 0 disconnected
+eps_optimal_relative: 1e-3
+eps_feasible_relative: 1e-3
+time_sec_limit: 60
+iteration_limit: 2000
+feasibility_polishing: true
+verbose: false

@@ -142,10 +142,30 @@ int main(int argc, char* argv[]) {
               << " obj=" << sol.obj_value
               << " solve_time=" << solve_time << "s\n";
 
+    int routed = 0, disconnected = 0;
+    double round_time = 0.0;
+
     if (!solved) {
         std::cerr << "[main] WARNING: solver did not reach OPTIMAL"
                      " (status=" << (int)sol.status << "). "
                      "Skipping rounding.\n";
+        // Still emit summary so param-sweep scripts can harvest obj/iters/n_vars.
+        double wall_time = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - wall0).count();
+        std::cout << "\n=== router_lp summary ===\n"
+                  << "  n_vars       : " << prob.n_vars          << "\n"
+                  << "  n_cons       : " << prob.n_cons          << "\n"
+                  << "  nnz          : " << prob.csr_col.size()  << "\n"
+                  << "  n_nets_in    : " << prob.n_nets          << "\n"
+                  << "  routed_nets  : " << 0                    << "\n"
+                  << "  disconnected : " << prob.n_nets          << "\n"
+                  << "  obj_value    : " << sol.obj_value        << "\n"
+                  << "  iterations   : " << sol.iterations       << "\n"
+                  << "  build_time   : " << build_time           << "s\n"
+                  << "  solve_time   : " << solve_time           << "s\n"
+                  << "  round_time   : " << 0.0                  << "s\n"
+                  << "  total_time   : " << wall_time            << "s\n"
+                  << "  output       : " << out_path             << "\n";
         return 1;
     }
 
@@ -153,9 +173,8 @@ int main(int argc, char* argv[]) {
     auto t_round0 = std::chrono::steady_clock::now();
     auto routes = rlp::round_lp_solution(prob, sol, threshold);
     auto t_round1 = std::chrono::steady_clock::now();
-    double round_time = std::chrono::duration<double>(t_round1 - t_round0).count();
+    round_time = std::chrono::duration<double>(t_round1 - t_round0).count();
 
-    int routed = 0, disconnected = 0;
     for (const auto& r : routes) {
         if (r.segments.empty()) ++disconnected;
         else ++routed;
