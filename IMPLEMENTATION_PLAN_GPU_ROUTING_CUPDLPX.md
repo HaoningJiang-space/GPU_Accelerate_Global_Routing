@@ -77,7 +77,7 @@
 1. `python --version`（建议 3.11）
 2. `cmake --version`（>= 3.20）
 3. `nvcc --version`（建议 CUDA >= 12.4）
-4. `nvidia-smi`（确认 GPU 可用）
+4. `nvitop`（确认 GPU 可用）
 
 ### 0.3 验收标准
 1. 能激活环境并导入核心 Python 包。
@@ -202,15 +202,7 @@
 ## 3. Git 管理策略（随时可执行）
 
 ## 3.1 分支策略
-- 主分支：`main`（只接收可运行结果）
-- 功能分支统一前缀：`codex/`
-
-建议分支序列：
-1. `codex/phase-a-baseline-harness`
-2. `codex/phase-b0-cupdlpx-direct-poc`
-3. `codex/phase-b-lp-ir-minimal`
-4. `codex/phase-c-router-lp-prototype`
-5. `codex/phase-d-tuning-and-regression`
+- 主分支：`main`
 
 ## 3.2 提交粒度
 每个 commit 只做一类变化：
