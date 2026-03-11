@@ -69,7 +69,9 @@ static bool load_yaml_params(const std::string& path, pdhg_parameters_t& params)
 
 bool solve_routing_lp(const RoutingLPProblem& prob,
                       const std::string& config_path,
-                      RoutingLPSolution& sol)
+                      RoutingLPSolution& sol,
+                      double time_limit_s,
+                      double inexact_tol)
 {
     // 1. Set parameters
     pdhg_parameters_t params;
@@ -82,6 +84,14 @@ bool solve_routing_lp(const RoutingLPProblem& prob,
             std::cout << "[cupdlpx_adapter] Could not load " << config_path
                       << ", using defaults\n";
         }
+    }
+
+    // CLI overrides take precedence over YAML values.
+    if (time_limit_s >= 0.0)
+        params.termination_criteria.time_sec_limit = time_limit_s;
+    if (inexact_tol >= 0.0) {
+        params.termination_criteria.eps_optimal_relative  = inexact_tol;
+        params.termination_criteria.eps_feasible_relative = inexact_tol;
     }
 
     // 2. Log problem size and active GPU device

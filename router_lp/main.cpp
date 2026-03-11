@@ -22,6 +22,8 @@
 #include "include/adaptive_routing.hpp"
 #include "include/lagrangian_router.hpp"
 #include "include/lagrangian_gpu.hpp"
+#include "include/repair_router.hpp"
+#include "include/hotspot_polish.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -37,6 +39,9 @@ static void usage(const char* prog) {
            " [--mode pure_lp|windowed|adaptive|lagrangian] [--max-nets N] [--max-hpwl N]"
            " [--window-x N] [--window-y N] [--margin N] [--batch-grid N]"
            " [--lag-iters N] [--lag-step F] [--lag-decay F] [--lag-beta F] [--lag-ema F]"
+           " [--lag-gpu]"
+           " [--no-repair]"
+           " [--lag-polish] [--lag-polish-max N]"
            " [--gpu N] [--config yaml] [--threshold T] [--no-via]"
            " [--inexact-tol T]\n";
 }
@@ -63,6 +68,9 @@ int main(int argc, char* argv[]) {
     double inexact_tol    = 1e-3;
     bool   add_via        = true;
     bool   lag_gpu        = false;  // use GPU-parallel BF Lagrangian
+    bool   no_repair      = false;  // disable repair pass after lagrangian
+    bool   lag_polish     = false;  // enable cuPDLPx hotspot polishing
+    int    lag_polish_max = 200;    // max hotspot nets for polishing LP
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -90,6 +98,9 @@ int main(int argc, char* argv[]) {
         else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
         else if (a == "--no-via")       add_via     = false;
         else if (a == "--lag-gpu")      lag_gpu     = true;
+        else if (a == "--no-repair")    no_repair   = true;
+        else if (a == "--lag-polish")   lag_polish  = true;
+        else if (a == "--lag-polish-max") lag_polish_max = std::stoi(next());
         else if (a == "--mode")         mode        = next();
         else { std::cerr << "Unknown option: " << a << "\n"; usage(argv[0]); return 1; }
     }
@@ -285,8 +296,46 @@ int main(int argc, char* argv[]) {
             ? rlp::run_lagrangian_routing_gpu(twonets, grid, lcfg, lstats)
             : rlp::run_lagrangian_routing    (twonets, grid, lcfg, lstats);
 
+        // ── Repair pass: re-route disconnected nets with λ=0 ─────────────────
+        if (!no_repair) {
+            int repaired = rlp::repair_disconnected_nets(
+                routes, twonets, grid, /*add_via=*/add_via);
+            if (repaired > 0)
+                std::cout << "[repair] Repaired " << repaired
+                          << " disconnected nets\n";
+            lstats.n_nets_disconnected -= repaired;
+            lstats.n_nets_routed       += repaired;
+        }
+
+        // ── Hotspot polishing with cuPDLPx ────────────────────────────────────
+        if (lag_polish) {
+            rlp::HotspotPolishConfig polish_cfg;
+            polish_cfg.overflow_threshold  = 0.0;
+            polish_cfg.max_nets_to_polish  = lag_polish_max;
+            polish_cfg.lp_time_limit_s     = 30.0;
+            polish_cfg.inexact_tol         = inexact_tol;
+            polish_cfg.add_via             = add_via;  // honour --no-via in LP build
+            polish_cfg.cupdlpx_config_path = config_path;
+
+            auto pstats = rlp::run_hotspot_polish(routes, twonets, grid, polish_cfg);
+            std::cout << "[polish] overflowed_edges=" << pstats.n_overflowed_edges
+                      << "  hotspot_nets="  << pstats.n_hotspot_nets
+                      << "  improved="      << pstats.n_nets_improved
+                      << "  viol_before="   << pstats.viol_before
+                      << "  viol_after="    << pstats.viol_after
+                      << "  time="          << pstats.polish_time_s << "s\n";
+        }
+
         if (!rlp::write_out_file(out_path, routes)) {
             std::cerr << "[main] Failed to write output\n"; return 1;
+        }
+
+        // Recompute violation stats after repair and optional polish so that
+        // the summary reflects the final output, not the raw Lagrangian result.
+        double post_max_viol = lstats.final_max_violation;
+        double post_avg_viol = lstats.final_avg_violation;
+        if (!no_repair || lag_polish) {
+            rlp::compute_route_violations(routes, grid, post_max_viol, post_avg_viol);
         }
 
         double wall_time = std::chrono::duration<double>(
@@ -305,8 +354,8 @@ int main(int argc, char* argv[]) {
                   << "  n_nets_in    : " << lstats.n_nets_routed + lstats.n_nets_disconnected << "\n"
                   << "  routed_nets  : " << lstats.n_nets_routed       << "\n"
                   << "  disconnected : " << lstats.n_nets_disconnected  << "\n"
-                  << "  max_viol     : " << lstats.final_max_violation  << "\n"
-                  << "  avg_viol     : " << lstats.final_avg_violation  << "\n"
+                  << "  max_viol     : " << post_max_viol              << "\n"
+                  << "  avg_viol     : " << post_avg_viol              << "\n"
                   << "  obj_value    : N/A\n"
                   << "  iterations   : " << lstats.iters_run           << "\n"
                   << "  build_time   : 0s\n"
@@ -316,7 +365,7 @@ int main(int argc, char* argv[]) {
                   << "  output       : " << out_path                   << "\n";
 
         bool success = (lstats.n_nets_routed > 0 && lstats.n_nets_disconnected == 0
-                        && lstats.final_max_violation <= 0.0);
+                        && post_max_viol <= 0.0);
         return success ? 0 : 1;
     }
 
