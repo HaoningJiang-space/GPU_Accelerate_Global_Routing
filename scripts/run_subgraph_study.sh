@@ -67,7 +67,8 @@ run_point() {
     elif grep -qF "Pre-flight reject" "${TMPLOG}" 2>/dev/null; then status="SKIPPED_OVERSIZE"
     elif grep -qF "Overflow guard"    "${TMPLOG}" 2>/dev/null; then status="SKIPPED_OVERSIZE"
     elif grep -qF "No nets after"     "${TMPLOG}" 2>/dev/null; then status="NO_NETS"
-    elif [[ "${RC}" -ne 0   ]]; then status="SOLVER_LIMIT"
+    elif grep -qF "solver did not reach OPTIMAL" "${TMPLOG}" 2>/dev/null; then status="SOLVER_LIMIT"
+    elif [[ "${RC}" -ne 0   ]]; then status="INFRA_ERROR"
     elif [[ "${disconn:-1}" -eq 0 && "${routed:-0}" -ge 1 ]]; then status="OK"
     else status="PARTIAL"
     fi

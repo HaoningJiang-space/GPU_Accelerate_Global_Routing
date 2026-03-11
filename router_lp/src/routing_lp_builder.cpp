@@ -159,14 +159,18 @@ bool build_routing_lp(const std::vector<TwoNet>& all_nets,
               << "] y=[" << y0 << "," << y1 << "]\n";
 
     // 3. Pre-flight size estimate before expensive enumeration.
-    //    Estimate upper-bound on n_edges from bbox dimensions so we can
-    //    reject obviously oversized problems without allocating anything.
+    //    Use layer_dir to count H- and V-preferred edges separately —
+    //    each layer contributes edges only in its preferred direction,
+    //    so this estimate is tight rather than a 2× worst-case overcount.
     {
         int64_t bx = x1 - x0 + 1, by = y1 - y0 + 1, bl = l1 - l0 + 1;
-        // H-edges: (bx-1)*by per H-layer, V-edges: bx*(by-1) per V-layer
-        // Via-edges: bx*by*(bl-1) if enabled.  Use worst-case: all layers both dirs.
-        int64_t est_edges = bl * (bx * by * 2LL) +
-                            (cfg.add_via_edges ? bx * by * (bl > 1 ? bl - 1 : 0) : 0);
+        int64_t h_edges = 0, v_edges = 0;
+        for (int l = l0; l <= l1; ++l) {
+            if (grid.layer_dir[l] == 0) h_edges += (bx - 1) * by;   // H-layer
+            else                         v_edges += bx * (by - 1);   // V-layer
+        }
+        int64_t via_edges = cfg.add_via_edges ? bx * by * (bl > 1 ? bl - 1 : 0) : 0;
+        int64_t est_edges = h_edges + v_edges + via_edges;
         int64_t n_nets64  = (int64_t)nets.size();
         int64_t est_vars  = n_nets64 * est_edges * 2LL;
         constexpr int64_t MAX_VARS_EST = 10'000'000LL;
@@ -178,6 +182,7 @@ bool build_routing_lp(const std::vector<TwoNet>& all_nets,
                       << " y=[" << y0 << "," << y1 << "]"
                       << "  n_nets=" << n_nets64
                       << "  est_edges=" << est_edges
+                      << " (h=" << h_edges << " v=" << v_edges << " via=" << via_edges << ")"
                       << "\n  Reduce --max-nets or --max-hpwl to shrink the joint bounding box.\n";
             return false;
         }

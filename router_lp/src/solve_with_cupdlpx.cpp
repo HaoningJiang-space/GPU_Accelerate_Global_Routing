@@ -136,9 +136,10 @@ bool solve_routing_lp(const RoutingLPProblem& prob,
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
 
     // 5. Parse result
-    sol.solve_time_s = elapsed;
-    sol.iterations   = res->total_count;
-    sol.obj_value    = res->primal_objective_value;
+    sol.solve_time_s    = elapsed;
+    sol.iterations      = res->total_count;
+    sol.obj_value       = res->primal_objective_value;
+    sol.primal_residual = res->absolute_primal_residual;
 
     switch (res->termination_reason) {
         case TERMINATION_REASON_OPTIMAL:
@@ -165,6 +166,7 @@ bool solve_routing_lp(const RoutingLPProblem& prob,
               << (int)res->termination_reason
               << " iters=" << res->total_count
               << " obj=" << res->primal_objective_value
+              << " primal_res=" << res->absolute_primal_residual
               << " time=" << elapsed << "s\n";
 
     if (res->primal_solution && prob.n_vars > 0) {

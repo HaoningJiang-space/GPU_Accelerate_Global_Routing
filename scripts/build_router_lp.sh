@@ -16,6 +16,7 @@ SRCS=(
     "${REPO}/router_lp/src/routing_lp_builder.cpp"
     "${REPO}/router_lp/src/solve_with_cupdlpx.cpp"
     "${REPO}/router_lp/src/solution_rounding.cpp"
+    "${REPO}/router_lp/src/windowed_routing.cpp"
 )
 
 echo "[build] Compiling router_lp..."

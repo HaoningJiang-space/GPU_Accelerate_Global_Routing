@@ -76,6 +76,8 @@ struct RoutingLPSolution {
     double solve_time_s;
     int iterations;
 
+    double primal_residual = -1.0;  // absolute_primal_residual from solver (-1 = unknown)
+
     // True only when solver found an optimal (or feasibility-polished) solution.
     // TIME_LIMIT / ITER_LIMIT are NOT considered "solved" for downstream use.
     bool is_solved() const { return status == Status::OPTIMAL; }

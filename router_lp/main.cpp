@@ -3,18 +3,22 @@
 //
 // Usage:
 //   router_lp -cap <file.cap> -net <file.net> -out <file.out>
-//             [--mode pure_lp]
+//             [--mode pure_lp|windowed]
 //             [--max-nets N]    (default 0 = unlimited)
-//             [--max-hpwl N]    (default 40, gcell units)
+//             [--max-hpwl N]    (default 40, gcell units; pure_lp mode)
+//             [--window-x N]    (default 40; windowed mode)
+//             [--window-y N]    (default 40; windowed mode)
 //             [--gpu N]         (sets CUDA_VISIBLE_DEVICES before solve)
 //             [--config <yaml>] (solver params; default: config/cupdlpx_routing_default.yaml)
 //             [--threshold T]   (rounding threshold; default 0.1)
 //             [--no-via]        (skip via edges in LP)
+//             [--inexact-tol T] (primal residual tolerance for inexact rounding; default 1e-3)
 
 #include "include/file_reader.hpp"
 #include "include/routing_lp_builder.hpp"
 #include "include/solve_with_cupdlpx.hpp"
 #include "include/solution_rounding.hpp"
+#include "include/windowed_routing.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -27,19 +31,25 @@ static void usage(const char* prog) {
     std::cerr
         << "Usage: " << prog
         << " -cap <cap> -net <net> -out <out>"
-           " [--mode pure_lp] [--max-nets N] [--max-hpwl N]"
-           " [--gpu N] [--config yaml] [--threshold T] [--no-via]\n";
+           " [--mode pure_lp|windowed] [--max-nets N] [--max-hpwl N]"
+           " [--window-x N] [--window-y N]"
+           " [--gpu N] [--config yaml] [--threshold T] [--no-via]"
+           " [--inexact-tol T]\n";
 }
 
 int main(int argc, char* argv[]) {
     // ── Parse arguments ───────────────────────────────────────────────────────
     std::string cap_path, net_path, out_path;
     std::string config_path = "config/cupdlpx_routing_default.yaml";
-    int    max_nets   = 0;
-    int    max_hpwl   = 40;
-    int    gpu_id     = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
-    double threshold  = 0.1;
-    bool   add_via    = true;
+    std::string mode      = "pure_lp";
+    int    max_nets       = 0;
+    int    max_hpwl       = 40;
+    int    window_x       = 40;
+    int    window_y       = 40;
+    int    gpu_id         = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
+    double threshold      = 0.1;
+    double inexact_tol    = 1e-3;
+    bool   add_via        = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -47,16 +57,19 @@ int main(int argc, char* argv[]) {
             if (i + 1 >= argc) { std::cerr << "Missing value for " << a << "\n"; std::exit(1); }
             return argv[++i];
         };
-        if      (a == "-cap")        cap_path    = next();
-        else if (a == "-net")        net_path    = next();
-        else if (a == "-out")        out_path    = next();
-        else if (a == "--config")    config_path = next();
-        else if (a == "--max-nets")  max_nets    = std::stoi(next());
-        else if (a == "--max-hpwl")  max_hpwl    = std::stoi(next());
-        else if (a == "--gpu")       gpu_id      = std::stoi(next());
-        else if (a == "--threshold") threshold   = std::stod(next());
-        else if (a == "--no-via")    add_via     = false;
-        else if (a == "--mode")      next();  // only pure_lp for now
+        if      (a == "-cap")           cap_path    = next();
+        else if (a == "-net")           net_path    = next();
+        else if (a == "-out")           out_path    = next();
+        else if (a == "--config")       config_path = next();
+        else if (a == "--max-nets")     max_nets    = std::stoi(next());
+        else if (a == "--max-hpwl")     max_hpwl    = std::stoi(next());
+        else if (a == "--window-x")     window_x    = std::stoi(next());
+        else if (a == "--window-y")     window_y    = std::stoi(next());
+        else if (a == "--gpu")          gpu_id      = std::stoi(next());
+        else if (a == "--threshold")    threshold   = std::stod(next());
+        else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
+        else if (a == "--no-via")       add_via     = false;
+        else if (a == "--mode")         mode        = next();
         else { std::cerr << "Unknown option: " << a << "\n"; usage(argv[0]); return 1; }
     }
 
@@ -107,9 +120,52 @@ int main(int argc, char* argv[]) {
         auto decomp = rlp::decompose_to_2pin(mp);
         for (auto& tn : decomp) twonets.push_back(std::move(tn));
     }
-    std::cout << "[main] 2-pin nets: " << twonets.size() << "\n";
+    std::cout << "[main] 2-pin nets: " << twonets.size() << "  mode=" << mode << "\n";
 
-    // ── B2: Build LP ──────────────────────────────────────────────────────────
+    // ── Windowed mode ─────────────────────────────────────────────────────────
+    if (mode == "windowed") {
+        rlp::WindowedRoutingConfig wcfg;
+        wcfg.window_x          = window_x;
+        wcfg.window_y          = window_y;
+        wcfg.add_via_edges     = add_via;
+        wcfg.threshold         = threshold;
+        wcfg.config_path       = config_path;
+        wcfg.inexact_residual_tol = inexact_tol;
+
+        rlp::WindowedRoutingStats wstats;
+        auto routes = rlp::run_windowed_routing(twonets, grid, wcfg, wstats);
+
+        if (!rlp::write_out_file(out_path, routes)) {
+            std::cerr << "[main] Failed to write output\n"; return 1;
+        }
+
+        double wall_time = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - wall0).count();
+
+        std::cout << "\n=== router_lp summary ===\n"
+                  << "  mode         : windowed\n"
+                  << "  window_xy    : " << window_x << "x" << window_y << "\n"
+                  << "  n_vars       : N/A (per-window)\n"
+                  << "  n_cons       : N/A (per-window)\n"
+                  << "  nnz          : N/A (per-window)\n"
+                  << "  n_nets_in    : " << wstats.n_nets_total     << "\n"
+                  << "  routed_nets  : " << wstats.n_nets_routed    << "\n"
+                  << "  disconnected : " << wstats.n_nets_disconnected << "\n"
+                  << "  unassigned   : " << wstats.n_nets_unassigned << "\n"
+                  << "  obj_value    : N/A\n"
+                  << "  iterations   : N/A\n"
+                  << "  build_time   : " << wstats.total_build_time  << "s\n"
+                  << "  solve_time   : " << wstats.total_solve_time  << "s\n"
+                  << "  round_time   : " << wstats.total_round_time  << "s\n"
+                  << "  total_time   : " << wall_time                << "s\n"
+                  << "  output       : " << out_path                 << "\n";
+
+        bool success = (wstats.n_nets_routed > 0 && wstats.n_nets_disconnected == 0
+                        && wstats.n_nets_unassigned == 0);
+        return success ? 0 : 1;
+    }
+
+    // ── B2: Build LP (pure_lp mode) ───────────────────────────────────────────
     rlp::LPBuilderConfig bcfg;
     bcfg.max_hpwl     = max_hpwl;
     bcfg.add_via_edges = add_via;
