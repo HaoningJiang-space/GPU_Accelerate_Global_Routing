@@ -149,10 +149,10 @@ bool build_routing_lp(const std::vector<TwoNet>& all_nets,
             y0 = std::min(y0, g->y); y1 = std::max(y1, g->y);
         }
     }
-    // Clamp to grid
-    l0 = std::max(0, l0); l1 = std::min(grid.L-1, l1);
-    x0 = std::max(0, x0); x1 = std::min(grid.X-1, x1);
-    y0 = std::max(0, y0); y1 = std::min(grid.Y-1, y1);
+    // Clamp to grid (apply margin before clamping)
+    l0 = std::max(0,        l0 - cfg.margin); l1 = std::min(grid.L-1, l1 + cfg.margin);
+    x0 = std::max(0,        x0 - cfg.margin); x1 = std::min(grid.X-1, x1 + cfg.margin);
+    y0 = std::max(0,        y0 - cfg.margin); y1 = std::min(grid.Y-1, y1 + cfg.margin);
 
     std::cout << "[lp_builder] " << nets.size() << " nets, bounding box "
               << "l=[" << l0 << "," << l1 << "] x=[" << x0 << "," << x1

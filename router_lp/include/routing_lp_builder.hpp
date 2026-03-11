@@ -18,8 +18,9 @@
 namespace rlp {
 
 struct LPBuilderConfig {
-    int   max_hpwl  = 40;   // skip nets with HPWL > this (gcell units, sum of x+y+z span)
-    bool  add_via_edges  = true;  // include layer-change (via) edges
+    int   max_hpwl      = 40;    // skip nets with HPWL > this (gcell units)
+    bool  add_via_edges = true;  // include layer-change (via) edges
+    int   margin        = 0;     // expand joint bbox by this many gcells per side
 };
 
 // Build the LP problem from a set of 2-pin nets and grid info.

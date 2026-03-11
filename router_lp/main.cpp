@@ -19,6 +19,7 @@
 #include "include/solve_with_cupdlpx.hpp"
 #include "include/solution_rounding.hpp"
 #include "include/windowed_routing.hpp"
+#include "include/adaptive_routing.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -46,6 +47,8 @@ int main(int argc, char* argv[]) {
     int    max_hpwl       = 40;
     int    window_x       = 40;
     int    window_y       = 40;
+    int    margin         = 5;
+    int    batch_grid     = 50;
     int    gpu_id         = -1;   // -1 = not set, respect CUDA_VISIBLE_DEVICES from env
     double threshold      = 0.1;
     double inexact_tol    = 1e-3;
@@ -65,6 +68,8 @@ int main(int argc, char* argv[]) {
         else if (a == "--max-hpwl")     max_hpwl    = std::stoi(next());
         else if (a == "--window-x")     window_x    = std::stoi(next());
         else if (a == "--window-y")     window_y    = std::stoi(next());
+        else if (a == "--margin")       margin      = std::stoi(next());
+        else if (a == "--batch-grid")   batch_grid  = std::stoi(next());
         else if (a == "--gpu")          gpu_id      = std::stoi(next());
         else if (a == "--threshold")    threshold   = std::stod(next());
         else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
@@ -162,6 +167,49 @@ int main(int argc, char* argv[]) {
 
         bool success = (wstats.n_nets_routed > 0 && wstats.n_nets_disconnected == 0
                         && wstats.n_nets_unassigned == 0);
+        return success ? 0 : 1;
+    }
+
+    // ── Adaptive mode ─────────────────────────────────────────────────────────
+    if (mode == "adaptive") {
+        rlp::AdaptiveRoutingConfig acfg;
+        acfg.margin            = margin;
+        acfg.batch_grid_x      = batch_grid;
+        acfg.batch_grid_y      = batch_grid;
+        acfg.add_via_edges     = add_via;
+        acfg.threshold         = threshold;
+        acfg.config_path       = config_path;
+        acfg.inexact_residual_tol = inexact_tol;
+
+        rlp::AdaptiveRoutingStats astats;
+        auto routes = rlp::run_adaptive_routing(twonets, grid, acfg, astats);
+
+        if (!rlp::write_out_file(out_path, routes)) {
+            std::cerr << "[main] Failed to write output\n"; return 1;
+        }
+
+        double wall_time = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - wall0).count();
+
+        std::cout << "\n=== router_lp summary ===\n"
+                  << "  mode         : adaptive\n"
+                  << "  batch_grid   : " << batch_grid << "x" << batch_grid << "\n"
+                  << "  margin       : " << margin << "\n"
+                  << "  n_vars       : N/A (per-batch)\n"
+                  << "  n_cons       : N/A (per-batch)\n"
+                  << "  nnz          : N/A (per-batch)\n"
+                  << "  n_nets_in    : " << astats.n_nets_total       << "\n"
+                  << "  routed_nets  : " << astats.n_nets_routed      << "\n"
+                  << "  disconnected : " << astats.n_nets_disconnected << "\n"
+                  << "  obj_value    : N/A\n"
+                  << "  iterations   : N/A\n"
+                  << "  build_time   : " << astats.total_build_time   << "s\n"
+                  << "  solve_time   : " << astats.total_solve_time   << "s\n"
+                  << "  round_time   : " << astats.total_round_time   << "s\n"
+                  << "  total_time   : " << wall_time                 << "s\n"
+                  << "  output       : " << out_path                  << "\n";
+
+        bool success = (astats.n_nets_routed > 0 && astats.n_nets_disconnected == 0);
         return success ? 0 : 1;
     }
 
