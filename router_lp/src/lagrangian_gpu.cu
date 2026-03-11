@@ -639,12 +639,12 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
                     try_pred(v, w, gx, gy-1, ll, gx, gy, ll);
                 }
             }
-            if (ll+1 < L) {
+            if (ctx->add_via && ll+1 < L) {
                 int v=lx*by*L+ly*L+(ll+1), ei=ll*gX*gY+gx*gY+gy;
                 int w=(int)((base_via+fmaxf(0.0f,h_lam_via[ei]))*COST_SCALE);
                 try_pred(v, w, gx, gy, ll, gx, gy, ll+1);
             }
-            if (ll > 0) {
+            if (ctx->add_via && ll > 0) {
                 int v=lx*by*L+ly*L+(ll-1), ei=(ll-1)*gX*gY+gx*gY+gy;
                 int w=(int)((base_via+fmaxf(0.0f,h_lam_via[ei]))*COST_SCALE);
                 try_pred(v, w, gx, gy, ll-1, gx, gy, ll);
