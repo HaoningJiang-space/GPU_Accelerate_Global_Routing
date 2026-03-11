@@ -51,8 +51,11 @@ __host__ __device__ inline int edge_eps(int ni, int ei) {
 
 // Small-net threshold: nets with n_local <= SMALL_THRESH have their dist[]
 // held in shared memory during BF, saving global-memory atomicMin latency.
-// 2048 ints = 8 KB shared mem → 6 concurrent blocks per SM (48 KB default).
-static constexpr int SMALL_THRESH = 2048;
+// 8192 ints = 32 KB shared mem per block, within the 48 KB hardware default.
+// On sm_86 (RTX 3090) 48 KB / 32 KB = 1.5 → 1 concurrent block/SM,
+// which is still a win vs global atomicMin for nets that fit.
+// Covers margin=5 nets up to ~bx*by*L ≤ 8192 (e.g. 28×29×10 or 90×90×1).
+static constexpr int SMALL_THRESH = 8192;
 
 // Per-net bbox descriptor uploaded to GPU once.
 struct NetGPU {
@@ -536,6 +539,11 @@ static LagGPUCtx* lag_gpu_init(
                               ctx->n_large * sizeof(NetGPU), cudaMemcpyHostToDevice));
     }
     CUDA_CHECK(cudaMalloc(&ctx->d_dist,      ctx->total_dist_nodes * sizeof(int)));
+    // Initialize d_dist to INF_DIST so that when max_iters=0 (no BF runs),
+    // extract_routes sees all sinks as unreachable and reports disconnected —
+    // matching CPU behaviour for --lag-iters 0.
+    CUDA_CHECK(cudaMemset(ctx->d_dist, 0x7f, ctx->total_dist_nodes * sizeof(int)));
+    // 0x7f7f7f7f = 2139062143, well above any realistic path cost, treated as INF.
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_h,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_v,     ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&ctx->d_lam_via,   ctx->LXY * sizeof(float)));
@@ -719,10 +727,10 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
     }
 
     // Final clean BF: recompute dist with the converged lambda but beta=0.
-    // This ensures lag_gpu_extract_routes (CPU) can match predecessors via
-    //   dist[v] + (base+lambda+eps)*COST_SCALE == d_cur
-    // without needing the dispersion term (which is not part of the actual route cost).
-    if (ctx->beta != 0.0f) {
+    // Skipped entirely when max_iters=0 (no iterations ran, lambda=0, dist
+    // should remain all-INF so extraction reports all nets disconnected —
+    // matching CPU behaviour for --lag-iters 0).
+    if (max_iters > 0 && ctx->beta != 0.0f) {
         reset_int_kernel<<<(ctx->total_dist_nodes+255)/256, 256>>>(
             ctx->d_dist, ctx->total_dist_nodes, INF_DIST);
         init_src_kernel<<<n_nets, 1>>>(ctx->d_nets, ctx->d_dist);
