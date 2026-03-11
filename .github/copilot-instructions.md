@@ -323,6 +323,33 @@ Pre-commit checklist: compiles, at least one small case runs end-to-end, key met
 - Internal headers live in `cuPDLPx/internal/`; public API only in `cuPDLPx/include/`
 - Python bindings are in `cuPDLPx/python_bindings/_core_bindings.cpp`
 
-### Mathematical Notation
+### Formal Problem Definition (from reference papers)
 
-Routing ILP: variable `f_{n,e} ∈ {0,1}` — net `n` uses edge `e`. LP relaxation drops integrality. cuPDLPx operates on the relaxed continuous form; integer recovery is the bridge layer's job.
+**Grid graph:** Undirected G(V,E). Nodes = G-Cells, edges = adjacent cell connections. Each edge e has `cap(e)`. Directed version D(V,E): each undirected edge e → two directed edges ê+ (left/bottom→right/top) and ê- (reverse).
+
+**ILP (Pathfinding DAC'23, also RUPlace DAC'25):**
+```
+Variables:  x_{n,ê} ∈ {0,1}   (net n uses directed edge ê)
+            (LP relaxation: x_{n,ê} ∈ [0,1])
+
+Capacity:   Σ_n (x_{n,ê+} + x_{n,ê-}) ≤ cap(e),  ∀e ∈ E
+
+Flow cons.: Σ_{ê ∈ E+(so(n))} x_{n,ê} = 1          (source sends out 1)
+            Σ_{ê ∈ E-(so(n))} x_{n,ê} = 0           (source receives 0)
+            Σ_{ê ∈ E-(si(n))} x_{n,ê} = 1            (sink receives 1)
+            Σ_{ê ∈ E+(si(n))} x_{n,ê} = 0            (sink sends out 0)
+            Σ_{ê ∈ E-(v)} x_{n,ê} = Σ_{ê ∈ E+(v)} x_{n,ê},  ∀v ∉ {so(n),si(n)}
+
+Objective:  min Σ_{n,e} (x_{n,ê+} + x_{n,ê-}) × c_{n,e}
+```
+Multi-pin nets are first decomposed into 2-pin nets via FLUTE (same as InstantGR).
+
+**Lagrangian decomposition (used in `lagrangian_path` mode):**
+- Relax capacity constraint into objective with multipliers μ_e ≥ 0
+- New edge cost: `C_{n,e} = c_{n,e} + μ_e`
+- Problem decomposes per net → independent shortest-path for each net
+- Update multipliers via gradient ascent: `μ_e^{k+1} = max(0, μ_e^k + α × ∇f(μ_e^k))`
+- Gradient: `∇f(μ_e) = Σ_n (x_{n,ê+} + x_{n,ê-}) - cap(e)` (demand minus capacity)
+- Solve each net with direction-aware weighted A\* (DAWA\*)
+
+**`pure_lp` mode:** feed LP relaxation directly to cuPDLPx (no Lagrangian decomposition). Suitable for small subgraphs. Variable indexing: directed edge `(e, dir)` for net `n` → var index `n * 2 * |E_sub| + e * 2 + dir`.
