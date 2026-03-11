@@ -153,11 +153,14 @@ int main(int argc, char* argv[]) {
     // pure_lp: max_hpwl is the joint-bbox limit handled inside build_routing_lp.
     // windowed / adaptive / lagrangian: filter individual 2-pin nets by HPWL
     // only when --max-hpwl was explicitly provided (preserving existing defaults).
-    if (mode != "pure_lp" && max_hpwl_set && max_hpwl > 0) {
+    if (mode != "pure_lp" && max_hpwl_set) {
+        // Use the same 3D HPWL definition as the LP builder: |dx|+|dy|+|dl|.
+        // --max-hpwl 0 filters all nets with HPWL > 0 (consistent with pure_lp).
         auto rm = std::remove_if(twonets.begin(), twonets.end(),
             [&](const rlp::TwoNet& n) {
                 int h = std::abs(n.src.loc.x - n.snk.loc.x)
-                      + std::abs(n.src.loc.y - n.snk.loc.y);
+                      + std::abs(n.src.loc.y - n.snk.loc.y)
+                      + std::abs(n.src.loc.l - n.snk.loc.l);
                 return h > max_hpwl;
             });
         int removed = (int)(twonets.end() - rm);
