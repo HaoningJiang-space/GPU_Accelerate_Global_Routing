@@ -5,3 +5,4 @@ InstantGR/run/evaluator
 benchmarks/ispd2024/
 results/baseline/*/route.out
 results/baseline/*/runtime.txt
+router_lp/examples/min_route_lp_poc

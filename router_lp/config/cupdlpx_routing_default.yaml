@@ -1,0 +1,7 @@
+presolve: true
+termination_evaluation_frequency: 200
+eps_opt: 1.0e-4
+eps_feas: 1.0e-4
+time_limit_s: 60.0
+feasibility_polishing: true
+verbose: false
