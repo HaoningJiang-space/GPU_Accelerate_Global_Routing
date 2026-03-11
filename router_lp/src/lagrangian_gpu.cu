@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -223,8 +224,9 @@ __global__ void bf_iters_kernel(
 }
 
 // Trace path snk->src per net (one thread per net), accumulate edge usage.
-// Exact integer equality dist[v]+w == dist[cur] is valid because both BF and
-// trace use the same lambda values and the same integer truncation formula.
+// Tie-breaking: among all equal-cost predecessors, select the one with the
+// smallest lambda (less congested), then smallest edge_id (deterministic).
+// Lambda is read-only during tracing — no race condition.
 __global__ void trace_and_use_kernel(
     const NetGPU* __restrict__ nets,
     const int*    __restrict__ d_dist,
@@ -264,58 +266,57 @@ __global__ void trace_and_use_kernel(
         float base_wire = unit_wire_cost * d_layer_sc[ll];
         float base_via  = unit_via_cost;
         int   dir       = d_layer_dir[ll];
-        bool  moved     = false;
 
-        // Check each possible predecessor in the same order as bf_pass
-        if (!moved && dir == 0 && lx+1 < bx) {
-            int v  = (lx+1)*by*L + ly*L + ll;
-            int ei = ll*gX*gY + gx*gY + gy;
-            int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_h + ei, 1.0f); cur = v; moved = true;
-            }
+        // Best predecessor: primary key = min lambda (congestion proxy),
+        // secondary key = min edge_id (deterministic). type: 0=H 1=V 2=via.
+        int   best_v = -1, best_ei = -1, best_type = -1;
+        float best_lam = FLT_MAX;
+
+#define CHECK_PRED_H(v_, ei_) {                                             \
+    int v__=(v_), ei__=(ei_);                                               \
+    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_h[ei__]))*COST_SCALE);       \
+    if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
+        float lam__=d_lam_h[ei__];                                          \
+        if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
+            best_v=v__; best_ei=ei__; best_type=0; best_lam=lam__; } } }
+
+#define CHECK_PRED_V(v_, ei_) {                                             \
+    int v__=(v_), ei__=(ei_);                                               \
+    int w__=(int)((base_wire+fmaxf(0.0f,d_lam_v[ei__]))*COST_SCALE);       \
+    if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
+        float lam__=d_lam_v[ei__];                                          \
+        if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
+            best_v=v__; best_ei=ei__; best_type=1; best_lam=lam__; } } }
+
+#define CHECK_PRED_VIA(v_, ei_) {                                           \
+    int v__=(v_), ei__=(ei_);                                               \
+    int w__=(int)((base_via+fmaxf(0.0f,d_lam_via[ei__]))*COST_SCALE);      \
+    if (dist[v__]!=INF_DIST && dist[v__]+w__==d_cur) {                     \
+        float lam__=d_lam_via[ei__];                                        \
+        if (lam__<best_lam||(lam__==best_lam&&ei__<best_ei)) {             \
+            best_v=v__; best_ei=ei__; best_type=2; best_lam=lam__; } } }
+
+        if (dir == 0) {
+            if (lx+1 < bx) CHECK_PRED_H((lx+1)*by*L+ly*L+ll, ll*gX*gY+gx*gY+gy)
+            if (lx > 0)    CHECK_PRED_H((lx-1)*by*L+ly*L+ll,  ll*gX*gY+(gx-1)*gY+gy)
         }
-        if (!moved && dir == 0 && lx > 0) {
-            int v  = (lx-1)*by*L + ly*L + ll;
-            int ei = ll*gX*gY + (gx-1)*gY + gy;
-            int w  = (int)((base_wire + fmaxf(0.0f, d_lam_h[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_h + ei, 1.0f); cur = v; moved = true;
-            }
+        if (dir == 1) {
+            if (ly+1 < by) CHECK_PRED_V(lx*by*L+(ly+1)*L+ll, ll*gX*gY+gx*gY+gy)
+            if (ly > 0)    CHECK_PRED_V(lx*by*L+(ly-1)*L+ll,  ll*gX*gY+gx*gY+(gy-1))
         }
-        if (!moved && dir == 1 && ly+1 < by) {
-            int v  = lx*by*L + (ly+1)*L + ll;
-            int ei = ll*gX*gY + gx*gY + gy;
-            int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_v + ei, 1.0f); cur = v; moved = true;
-            }
+        if (add_via) {
+            if (ll+1 < L) CHECK_PRED_VIA(lx*by*L+ly*L+(ll+1), ll*gX*gY+gx*gY+gy)
+            if (ll > 0)   CHECK_PRED_VIA(lx*by*L+ly*L+(ll-1),  (ll-1)*gX*gY+gx*gY+gy)
         }
-        if (!moved && dir == 1 && ly > 0) {
-            int v  = lx*by*L + (ly-1)*L + ll;
-            int ei = ll*gX*gY + gx*gY + (gy-1);
-            int w  = (int)((base_wire + fmaxf(0.0f, d_lam_v[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_v + ei, 1.0f); cur = v; moved = true;
-            }
-        }
-        if (!moved && add_via && ll+1 < L) {
-            int v  = lx*by*L + ly*L + (ll+1);
-            int ei = ll*gX*gY + gx*gY + gy;
-            int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_via + ei, 1.0f); cur = v; moved = true;
-            }
-        }
-        if (!moved && add_via && ll > 0) {
-            int v  = lx*by*L + ly*L + (ll-1);
-            int ei = (ll-1)*gX*gY + gx*gY + gy;
-            int w  = (int)((base_via + fmaxf(0.0f, d_lam_via[ei])) * COST_SCALE);
-            if (dist[v] != INF_DIST && dist[v] + w == d_cur) {
-                atomicAdd(d_use_via + ei, 1.0f); cur = v; moved = true;
-            }
-        }
-        if (!moved) break;
+#undef CHECK_PRED_H
+#undef CHECK_PRED_V
+#undef CHECK_PRED_VIA
+
+        if (best_v < 0) break;
+        if      (best_type == 0) atomicAdd(d_use_h   + best_ei, 1.0f);
+        else if (best_type == 1) atomicAdd(d_use_v   + best_ei, 1.0f);
+        else                     atomicAdd(d_use_via + best_ei, 1.0f);
+        cur = best_v;
     }
 }
 
@@ -533,6 +534,24 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
             CUDA_CHECK(cudaMemcpy(h_use_via.data(), ctx->d_use_via, LXY*4, cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_cap_h.data(),   ctx->d_cap_h,   LXY*4, cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_cap_v.data(),   ctx->d_cap_v,   LXY*4, cudaMemcpyDeviceToHost));
+
+            // Diagnostic: max lambda and max finite dist (overflow / quantization check)
+            std::vector<float> h_lam_h_d(LXY), h_lam_v_d(LXY);
+            CUDA_CHECK(cudaMemcpy(h_lam_h_d.data(), ctx->d_lam_h, LXY*4, cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_lam_v_d.data(), ctx->d_lam_v, LXY*4, cudaMemcpyDeviceToHost));
+            float max_lam = 0.0f;
+            for (int i = 0; i < LXY; ++i) {
+                max_lam = std::max(max_lam, std::max(h_lam_h_d[i], h_lam_v_d[i]));
+            }
+            std::vector<int> h_dist_d(ctx->total_dist_nodes);
+            CUDA_CHECK(cudaMemcpy(h_dist_d.data(), ctx->d_dist,
+                                  ctx->total_dist_nodes*4, cudaMemcpyDeviceToHost));
+            int max_finite_dist = 0, n_near_inf = 0;
+            for (int v : h_dist_d) {
+                if (v < INF_DIST) max_finite_dist = std::max(max_finite_dist, v);
+                else              ++n_near_inf;
+            }
+
             double max_v = 0.0, sum_v = 0.0; int n_ov = 0;
             for (int i = 0; i < LXY; ++i) {
                 double v = std::max({(double)(h_use_h[i]-h_cap_h[i]),
@@ -546,7 +565,10 @@ static void lag_gpu_run(LagGPUCtx* ctx, int max_iters, int log_every)
             std::cout << "[lag_gpu] iter=" << iter
                       << "  alpha=" << alpha
                       << "  max_viol=" << max_v
-                      << "  overload_edges=" << n_ov << "\n";
+                      << "  overload_edges=" << n_ov
+                      << "  max_lam=" << max_lam
+                      << "  max_finite_dist=" << max_finite_dist
+                      << "  INF_nodes=" << n_near_inf << "\n";
         }
     }
 }
@@ -599,57 +621,51 @@ static std::vector<NetRoute> lag_gpu_extract_routes(
             float base_wire = ctx->unit_wire_cost * h_lsc[ll];
             float base_via  = ctx->unit_via_cost;
             int   dir       = h_ldir[ll];
-            bool  moved     = false;
 
-            // try_pred: check if predecessor v is the correct prev-hop
-            // Emits segment (sx1,sy1,sz1)->(sx2,sy2,sz2) if matched.
-            auto try_pred = [&](int v, int w,
-                                int sx1, int sy1, int sz1,
-                                int sx2, int sy2, int sz2) {
-                if (moved || v < 0 || v >= ng.n_local) return;
+            // Best-match predecessor: primary = min lambda, secondary = min ei.
+            // Mirrors the tie-break in trace_and_use_kernel for full consistency.
+            struct Cand {
+                int v, ei, type; // type: 0=H 1=V 2=via
+                int sx1,sy1,sz1, sx2,sy2,sz2;
+                float lam;
+            };
+            Cand best{-1,-1,-1,0,0,0,0,0,0,FLT_MAX};
+
+            auto consider = [&](int v, int ei, float lam, int type,
+                                int sx1,int sy1,int sz1,int sx2,int sy2,int sz2,
+                                float cost_base, const std::vector<float>& lam_arr) {
+                if (v < 0 || v >= ng.n_local) return;
+                int w = (int)((cost_base + fmaxf(0.0f, lam_arr[ei])) * COST_SCALE);
                 if (dist[v] == INF_DIST || dist[v] + w != d_cur) return;
-                RoutingSegment seg;
-                seg.x1=sx1; seg.y1=sy1; seg.z1=sz1;
-                seg.x2=sx2; seg.y2=sy2; seg.z2=sz2;
-                r.segments.push_back(seg);
-                cur = v; moved = true;
+                if (lam < best.lam || (lam == best.lam && ei < best.ei))
+                    best = {v, ei, type, sx1,sy1,sz1,sx2,sy2,sz2, lam};
             };
 
             if (dir == 0) {
-                if (lx+1 < bx) {
-                    int v=(lx+1)*by*L+ly*L+ll, ei=ll*gX*gY+gx*gY+gy;
-                    int w=(int)((base_wire+fmaxf(0.0f,h_lam_h[ei]))*COST_SCALE);
-                    try_pred(v, w, gx, gy, ll, gx+1, gy, ll);
-                }
-                if (lx > 0) {
-                    int v=(lx-1)*by*L+ly*L+ll, ei=ll*gX*gY+(gx-1)*gY+gy;
-                    int w=(int)((base_wire+fmaxf(0.0f,h_lam_h[ei]))*COST_SCALE);
-                    try_pred(v, w, gx-1, gy, ll, gx, gy, ll);
-                }
+                if (lx+1 < bx) { int v=(lx+1)*by*L+ly*L+ll, ei=ll*gX*gY+gx*gY+gy;
+                    consider(v,ei,h_lam_h[ei],0, gx,gy,ll, gx+1,gy,ll, base_wire,h_lam_h); }
+                if (lx > 0)    { int v=(lx-1)*by*L+ly*L+ll, ei=ll*gX*gY+(gx-1)*gY+gy;
+                    consider(v,ei,h_lam_h[ei],0, gx-1,gy,ll, gx,gy,ll, base_wire,h_lam_h); }
             }
             if (dir == 1) {
-                if (ly+1 < by) {
-                    int v=lx*by*L+(ly+1)*L+ll, ei=ll*gX*gY+gx*gY+gy;
-                    int w=(int)((base_wire+fmaxf(0.0f,h_lam_v[ei]))*COST_SCALE);
-                    try_pred(v, w, gx, gy, ll, gx, gy+1, ll);
-                }
-                if (ly > 0) {
-                    int v=lx*by*L+(ly-1)*L+ll, ei=ll*gX*gY+gx*gY+(gy-1);
-                    int w=(int)((base_wire+fmaxf(0.0f,h_lam_v[ei]))*COST_SCALE);
-                    try_pred(v, w, gx, gy-1, ll, gx, gy, ll);
-                }
+                if (ly+1 < by) { int v=lx*by*L+(ly+1)*L+ll, ei=ll*gX*gY+gx*gY+gy;
+                    consider(v,ei,h_lam_v[ei],1, gx,gy,ll, gx,gy+1,ll, base_wire,h_lam_v); }
+                if (ly > 0)    { int v=lx*by*L+(ly-1)*L+ll, ei=ll*gX*gY+gx*gY+(gy-1);
+                    consider(v,ei,h_lam_v[ei],1, gx,gy-1,ll, gx,gy,ll, base_wire,h_lam_v); }
             }
-            if (ctx->add_via && ll+1 < L) {
-                int v=lx*by*L+ly*L+(ll+1), ei=ll*gX*gY+gx*gY+gy;
-                int w=(int)((base_via+fmaxf(0.0f,h_lam_via[ei]))*COST_SCALE);
-                try_pred(v, w, gx, gy, ll, gx, gy, ll+1);
+            if (ctx->add_via) {
+                if (ll+1 < L) { int v=lx*by*L+ly*L+(ll+1), ei=ll*gX*gY+gx*gY+gy;
+                    consider(v,ei,h_lam_via[ei],2, gx,gy,ll, gx,gy,ll+1, base_via,h_lam_via); }
+                if (ll > 0)   { int v=lx*by*L+ly*L+(ll-1), ei=(ll-1)*gX*gY+gx*gY+gy;
+                    consider(v,ei,h_lam_via[ei],2, gx,gy,ll-1, gx,gy,ll, base_via,h_lam_via); }
             }
-            if (ctx->add_via && ll > 0) {
-                int v=lx*by*L+ly*L+(ll-1), ei=(ll-1)*gX*gY+gx*gY+gy;
-                int w=(int)((base_via+fmaxf(0.0f,h_lam_via[ei]))*COST_SCALE);
-                try_pred(v, w, gx, gy, ll-1, gx, gy, ll);
-            }
-            if (!moved) break;
+
+            if (best.v < 0) break;
+            RoutingSegment seg;
+            seg.x1=best.sx1; seg.y1=best.sy1; seg.z1=best.sz1;
+            seg.x2=best.sx2; seg.y2=best.sy2; seg.z2=best.sz2;
+            r.segments.push_back(seg);
+            cur = best.v;
         }
 
         routes.push_back(std::move(r));
