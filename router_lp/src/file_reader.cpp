@@ -145,6 +145,10 @@ bool read_net_file(const std::string& path, const GridInfo& grid,
         MultiPinNet mnet;
         mnet.name = name;
 
+        // Collect all valid access points per pin group, then select the one
+        // closest to the net's bounding-box centre for better routability.
+        std::vector<std::vector<GCell>> groups;
+
         // Read pin groups until ')'
         while (pos < fsize) {
             // Skip whitespace/newlines to find '[' or ')'
@@ -154,33 +158,51 @@ bool read_net_file(const std::string& path, const GridInfo& grid,
             if (buf[pos] != '[') { ++pos; continue; }
             ++pos;  // consume '['
 
-            // Read first (l,x,y) triplet in this pin group.
-            // NOTE (P2): Only the first access point is used; alternatives are discarded.
-            //   This simplifies implementation but reduces routability when benchmarks
-            //   encode multiple equivalent access points per pin. A future improvement
-            //   would select the access point closest to the net's bounding box centre.
-            int l, x, y;
-            if (read_triplet(buf, pos, l, x, y)) {
-                if (l >= 0 && l < grid.L && x >= 0 && x < grid.X &&
-                    y >= 0 && y < grid.Y) {
-                    mnet.pins.push_back({x, y, l});
+            // Read ALL (l,x,y) triplets in this pin group
+            std::vector<GCell> group_pts;
+            while (pos < fsize && buf[pos] != ']') {
+                int l, x, y;
+                if (read_triplet(buf, pos, l, x, y)) {
+                    if (l >= 0 && l < grid.L && x >= 0 && x < grid.X &&
+                        y >= 0 && y < grid.Y) {
+                        group_pts.push_back({x, y, l});
+                    } else {
+                        std::cerr << "[file_reader] out-of-bounds access point "
+                                  << "(" << l << "," << x << "," << y
+                                  << ") in net " << name << ", skipping\n";
+                    }
+                    // Skip to next ',' or ']'
+                    while (pos < fsize && buf[pos] != ',' && buf[pos] != ']')
+                        ++pos;
                 } else {
-                    std::cerr << "[file_reader] out-of-bounds access point "
-                              << "(" << l << "," << x << "," << y
-                              << ") in net " << name << ", skipping pin\n";
+                    break;
                 }
             }
-            // Skip rest of pin group until ']'
-            while (pos < fsize && buf[pos] != ']') ++pos;
-            if (pos < fsize) ++pos;  // consume ']'
+            if (pos < fsize && buf[pos] == ']') ++pos;  // consume ']'
+            if (!group_pts.empty()) groups.push_back(std::move(group_pts));
         }
 
-        if ((int)mnet.pins.size() >= 2) {
-            nets.push_back(std::move(mnet));
-            ++n_ok;
-        } else {
-            ++n_skip;
+        if (groups.size() < 2) { ++n_skip; continue; }
+
+        // Compute bounding-box centre across all groups' first access points
+        // (used as a proxy for net centre; avoids chicken-and-egg with final selection)
+        double cx = 0, cy = 0;
+        for (const auto& g : groups) { cx += g[0].x; cy += g[0].y; }
+        cx /= (double)groups.size();
+        cy /= (double)groups.size();
+
+        // For each group, pick the access point closest to (cx, cy)
+        for (const auto& g : groups) {
+            const GCell* best = &g[0];
+            double best_d = (g[0].x - cx) * (g[0].x - cx) + (g[0].y - cy) * (g[0].y - cy);
+            for (int i = 1; i < (int)g.size(); ++i) {
+                double d = (g[i].x - cx) * (g[i].x - cx) + (g[i].y - cy) * (g[i].y - cy);
+                if (d < best_d) { best_d = d; best = &g[i]; }
+            }
+            mnet.pins.push_back(*best);
         }
+        nets.push_back(std::move(mnet));
+        ++n_ok;
     }
 
     std::cout << "[file_reader] read_net: " << n_ok << " nets loaded, "
