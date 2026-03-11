@@ -21,6 +21,7 @@
 #include "include/windowed_routing.hpp"
 #include "include/adaptive_routing.hpp"
 #include "include/lagrangian_router.hpp"
+#include "include/lagrangian_gpu.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -59,6 +60,7 @@ int main(int argc, char* argv[]) {
     double threshold      = 0.1;
     double inexact_tol    = 1e-3;
     bool   add_via        = true;
+    bool   lag_gpu        = false;  // use GPU-parallel BF Lagrangian
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -83,6 +85,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--threshold")    threshold   = std::stod(next());
         else if (a == "--inexact-tol")  inexact_tol = std::stod(next());
         else if (a == "--no-via")       add_via     = false;
+        else if (a == "--lag-gpu")      lag_gpu     = true;
         else if (a == "--mode")         mode        = next();
         else { std::cerr << "Unknown option: " << a << "\n"; usage(argv[0]); return 1; }
     }
@@ -272,7 +275,9 @@ int main(int argc, char* argv[]) {
         lcfg.log_every  = 10;
 
         rlp::LagrangianStats lstats;
-        auto routes = rlp::run_lagrangian_routing(twonets, grid, lcfg, lstats);
+        auto routes = lag_gpu
+            ? rlp::run_lagrangian_routing_gpu(twonets, grid, lcfg, lstats)
+            : rlp::run_lagrangian_routing    (twonets, grid, lcfg, lstats);
 
         if (!rlp::write_out_file(out_path, routes)) {
             std::cerr << "[main] Failed to write output\n"; return 1;
@@ -282,7 +287,8 @@ int main(int argc, char* argv[]) {
             std::chrono::steady_clock::now() - wall0).count();
 
         std::cout << "\n=== router_lp summary ===\n"
-                  << "  mode         : lagrangian\n"
+                  << "  mode         : lagrangian"
+                  << (lag_gpu ? " (GPU-BF)" : " (CPU-Dijkstra)") << "\n"
                   << "  lag_iters    : " << lstats.iters_run           << "\n"
                   << "  lag_step     : " << lag_step                   << "\n"
                   << "  lag_decay    : " << lag_decay                  << "\n"
