@@ -184,14 +184,19 @@ bool read_net_file(const std::string& path, const GridInfo& grid,
 
         if (groups.size() < 2) { ++n_skip; continue; }
 
-        // Compute bounding-box centre across all groups' first access points
-        // (used as a proxy for net centre; avoids chicken-and-egg with final selection)
-        double cx = 0, cy = 0;
-        for (const auto& g : groups) { cx += g[0].x; cy += g[0].y; }
-        cx /= (double)groups.size();
-        cy /= (double)groups.size();
+        // Compute bounding-box centre from ALL valid access points across ALL groups.
+        double xmin = 1e18, xmax = -1e18, ymin = 1e18, ymax = -1e18;
+        for (const auto& g : groups)
+            for (const auto& p : g) {
+                if (p.x < xmin) xmin = p.x;
+                if (p.x > xmax) xmax = p.x;
+                if (p.y < ymin) ymin = p.y;
+                if (p.y > ymax) ymax = p.y;
+            }
+        double cx = (xmin + xmax) * 0.5;
+        double cy = (ymin + ymax) * 0.5;
 
-        // For each group, pick the access point closest to (cx, cy)
+        // For each group, pick the access point closest to the global bbox centre
         for (const auto& g : groups) {
             const GCell* best = &g[0];
             double best_d = (g[0].x - cx) * (g[0].x - cx) + (g[0].y - cy) * (g[0].y - cy);
