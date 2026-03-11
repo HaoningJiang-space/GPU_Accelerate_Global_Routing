@@ -1,0 +1,6 @@
+method,benchmark,n_total_nets,n_2pin_nets,iters,time_s,max_viol,routed_2pin,disconnected_2pin,wl_cost,via_cost,overflow_cost_eval,total_cost_eval,notes
+InstantGR,mempool_tile_rank,135666,N/A,2,5.495,~15,N/A,0,7553701,3212488,3008599,13774789,GPU L-shape+detour (baseline)
+lag_cpu_omp_noWS,mempool_tile_rank,135666,537(500nets),20,20.6,34,537,0,N/A,N/A,N/A,N/A,80-thread OMP Dijkstra no warm-start 500nets subset
+lag_cpu_omp_WS,mempool_tile_rank,135666,537(500nets),20,20.9,28,537,0,N/A,N/A,N/A,N/A,80-thread OMP Dijkstra WITH warm-start 500nets subset
+lag_cpu_omp_full_5iter,mempool_tile_rank,135666,347145,5,55.5,618,333809,13336,30465664,6967952,inf,inf,OMP full run 5 iters - not converged
+lag_gpu_BF_20iter_2000nets,mempool_tile_rank,135666,7807(2000nets),20,175.4,188,913,6894,N/A,N/A,N/A,N/A,GPU BF 20 iter 2000-net subset
