@@ -21,6 +21,7 @@ SRCS=(
     "${REPO}/router_lp/src/windowed_routing.cpp"
     "${REPO}/router_lp/src/adaptive_routing.cpp"
     "${REPO}/router_lp/src/lagrangian_router.cpp"
+    "${REPO}/router_lp/src/lshape_init.cpp"
     "${REPO}/router_lp/src/repair_router.cpp"
     "${REPO}/router_lp/src/hotspot_polish.cpp"
 )

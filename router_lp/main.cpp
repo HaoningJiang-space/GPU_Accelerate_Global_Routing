@@ -39,7 +39,7 @@ static void usage(const char* prog) {
            " [--mode pure_lp|windowed|adaptive|lagrangian] [--max-nets N] [--max-hpwl N]"
            " [--window-x N] [--window-y N] [--margin N] [--batch-grid N]"
            " [--lag-iters N] [--lag-step F] [--lag-decay F] [--lag-beta F] [--lag-ema F]"
-           " [--lag-gpu]"
+           " [--lag-gpu] [--no-lshape]"
            " [--no-repair]"
            " [--lag-polish] [--lag-polish-max N]"
            " [--gpu N] [--config yaml] [--threshold T] [--no-via]"
@@ -71,6 +71,7 @@ int main(int argc, char* argv[]) {
     bool   no_repair      = false;  // disable repair pass after lagrangian
     bool   lag_polish     = false;  // enable cuPDLPx hotspot polishing
     int    lag_polish_max = 200;    // max hotspot nets for polishing LP
+    bool   lshape_ws      = true;   // L-shape warm-start (default on)
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -101,6 +102,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--no-repair")    no_repair   = true;
         else if (a == "--lag-polish")   lag_polish  = true;
         else if (a == "--lag-polish-max") lag_polish_max = std::stoi(next());
+        else if (a == "--no-lshape")    lshape_ws   = false;
         else if (a == "--mode")         mode        = next();
         else { std::cerr << "Unknown option: " << a << "\n"; usage(argv[0]); return 1; }
     }
@@ -290,6 +292,7 @@ int main(int argc, char* argv[]) {
         lcfg.log_every        = 10;
         lcfg.beta_dispersion  = lag_beta;
         lcfg.ema_momentum     = lag_ema;
+        lcfg.lshape_warmstart = lshape_ws;
 
         rlp::LagrangianStats lstats;
         auto routes = lag_gpu

@@ -3,6 +3,7 @@
 // See include/lagrangian_router.hpp for algorithm description.
 
 #include "../include/lagrangian_router.hpp"
+#include "../include/lshape_init.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -251,6 +252,12 @@ std::vector<NetRoute> run_lagrangian_routing(
               << "  decay=" << cfg.step_decay
               << "  margin=" << cfg.margin
               << "  omp_threads=" << n_threads << "\n";
+
+    // ── L-shape warm-start (optional) ────────────────────────────────────────
+    if (cfg.lshape_warmstart && cfg.max_iters > 0) {
+        float alpha_init = (float)(cfg.step_size * cfg.lshape_alpha);
+        lshape_warmstart(twonets, grid, alpha_init, lam_h, lam_v);
+    }
 
     // ── Subgradient iterations ────────────────────────────────────────────────
     for (int iter = 1; iter <= cfg.max_iters; ++iter) {

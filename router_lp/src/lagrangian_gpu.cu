@@ -16,6 +16,7 @@
 //   NaN/Inf safety: lambda is always >= 0 by construction (fmaxf clip).
 
 #include "../include/lagrangian_gpu.hpp"
+#include "../include/lshape_init.hpp"
 #include "../include/solution_rounding.hpp"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -600,6 +601,18 @@ static LagGPUCtx* lag_gpu_init(
     CUDA_CHECK(cudaMemset(ctx->d_use_prev_h,   0, ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMemset(ctx->d_use_prev_v,   0, ctx->LXY * sizeof(float)));
     CUDA_CHECK(cudaMemset(ctx->d_use_prev_via, 0, ctx->LXY * sizeof(float)));
+
+    // L-shape warm-start: compute initial λ on CPU and upload to GPU.
+    if (cfg.lshape_warmstart && cfg.max_iters > 0) {
+        std::vector<float> h_lam_h_ws(ctx->LXY, 0.0f);
+        std::vector<float> h_lam_v_ws(ctx->LXY, 0.0f);
+        float alpha_init = (float)(cfg.step_size * cfg.lshape_alpha);
+        lshape_warmstart(twonets, grid, alpha_init, h_lam_h_ws, h_lam_v_ws);
+        CUDA_CHECK(cudaMemcpy(ctx->d_lam_h, h_lam_h_ws.data(),
+                              ctx->LXY * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(ctx->d_lam_v, h_lam_v_ws.data(),
+                              ctx->LXY * sizeof(float), cudaMemcpyHostToDevice));
+    }
 
     return ctx;
 }

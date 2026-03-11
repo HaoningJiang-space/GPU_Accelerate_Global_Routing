@@ -35,6 +35,12 @@ struct LagrangianConfig {
     // Prevents 2-period oscillation caused by dispersion alternating congestion states.
     // 0.0 = plain copy (prev_use = current_use); 0.7 = recommended.
     double ema_momentum     = 0.3;
+    // L-shape warm-start: run a quick O(1)-per-net L-shape pass before the
+    // Lagrangian iterations to warm-start λ multipliers.  This reduces the
+    // number of iterations required to converge.
+    // init_alpha scale: λ_e = max(0, demand_e - cap_e) * step_size * lshape_alpha.
+    bool   lshape_warmstart = true;
+    double lshape_alpha     = 0.5;   // multiplier scale for warm-start λ init
 };
 
 struct LagrangianStats {
